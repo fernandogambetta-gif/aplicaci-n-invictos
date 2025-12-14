@@ -1,34 +1,12 @@
-
 import { Product, Sale, User, AppConfig, CategoryItem, ProviderItem, UserSecurity } from '../types';
-import { initializeApp } from 'firebase/app';
-import { 
-  getFirestore, collection, getDocs, doc, setDoc, deleteDoc, 
-  enableIndexedDbPersistence, query, where, updateDoc
+
+import {
+  collection, getDocs, doc, setDoc, deleteDoc,
+  query, where, updateDoc
 } from 'firebase/firestore';
 
-// --- FIREBASE CONFIGURATION ---
-const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-};
+import { db } from "./firebase";
 
-// Initialize Firebase only if keys are present
-let db: any = null;
-if (firebaseConfig.apiKey) {
-    const app = initializeApp(firebaseConfig);
-    db = getFirestore(app,'invictos-bd');
-    // Enable offline persistence
-    enableIndexedDbPersistence(db).catch((err) => {
-        if (err.code == 'failed-precondition') {
-             console.warn('Persistence failed: Multiple tabs open');
-        } else if (err.code == 'unimplemented') {
-             console.warn('Persistence not supported by browser');
-        }
-    });
-} else {
-    console.warn("⚠️ Firebase keys missing. App will fail to load data.");
-}
 
 // Collections
 const COLLECTIONS = {
