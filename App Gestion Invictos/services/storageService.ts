@@ -17,7 +17,7 @@ const firebaseConfig = {
 let db: any = null;
 if (firebaseConfig.apiKey) {
     const app = initializeApp(firebaseConfig);
-    db = getFirestore(app);
+    db = getFirestore(app,'invictos-bd');
     // Enable offline persistence
     enableIndexedDbPersistence(db).catch((err) => {
         if (err.code == 'failed-precondition') {
