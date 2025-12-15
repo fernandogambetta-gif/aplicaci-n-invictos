@@ -22,7 +22,8 @@ if (apiKey && authDomain && projectId) {
   // ✅ Usá SOLO si tenés multi-database creado en Firestore.
   // Si NO, dejá la línea default (recomendada).
   // db = getFirestore(app, 'invictos-bd');
-  db = getFirestore(app);
+db = getFirestore(app, 'invictos-bd');
+
 
   // Persistencia offline (si falla, solo loguea)
   enableIndexedDbPersistence(db).catch((err: any) => {
