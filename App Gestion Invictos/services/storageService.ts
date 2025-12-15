@@ -2,10 +2,12 @@ import { Product, Sale, User, AppConfig, CategoryItem, ProviderItem, UserSecurit
 import {
   collection,
   getDocs,
+  getDoc,
   doc,
   setDoc,
   deleteDoc,
   updateDoc,
+  increment,
 } from 'firebase/firestore';
 import { db } from './firebase';
 
@@ -44,8 +46,8 @@ const DEFAULT_SECURITY: UserSecurity = {
 };
 
 const INITIAL_USERS: User[] = [
-  { id: 'u1', name: 'Administrador', role: 'admin', pin: '1234', security: DEFAULT_SECURITY },
-  { id: 'u2', name: 'Vendedor 1', role: 'seller', pin: '0000', commissionPercentage: 3, security: DEFAULT_SECURITY },
+  { id: 'u1', name: 'Administrador', role: 'admin', pin: '1234', security: { ...DEFAULT_SECURITY } },
+  { id: 'u2', name: 'Vendedor 1', role: 'seller', pin: '0000', commissionPercentage: 3, security: { ...DEFAULT_SECURITY } },
 ];
 
 // --- HELPER TO MAP FIRESTORE DOCS ---
@@ -56,6 +58,7 @@ export const StorageService = {
   // --- USERS ---
   getUsers: async (): Promise<User[]> => {
     if (!db) return INITIAL_USERS;
+
     const snap = await getDocs(collection(db, COLLECTIONS.USERS));
     const users = mapDocs<User>(snap);
 
@@ -67,6 +70,7 @@ export const StorageService = {
       );
       return INITIAL_USERS;
     }
+
     return users.map((u) => ({ ...u, security: u.security || { ...DEFAULT_SECURITY } }));
   },
 
@@ -135,9 +139,10 @@ export const StorageService = {
   // --- CONFIG ---
   getConfig: async (): Promise<AppConfig> => {
     if (!db) return { commissionPercentage: 5 };
-    const snap = await getDocs(collection(db, COLLECTIONS.CONFIG));
-    if (snap.empty) return { commissionPercentage: 5 };
-    return snap.docs[0].data() as AppConfig;
+    const ref = doc(db, COLLECTIONS.CONFIG, 'main');
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return { commissionPercentage: 5 };
+    return snap.data() as AppConfig;
   },
 
   saveConfig: async (config: AppConfig): Promise<void> => {
@@ -145,6 +150,7 @@ export const StorageService = {
     await setDoc(
       doc(db, COLLECTIONS.CONFIG, 'main'),
       cleanData(config),
+      { merge: true },
     );
   },
 
@@ -195,21 +201,27 @@ export const StorageService = {
     return mapDocs<Product>(snap);
   },
 
- saveProduct: async (product: Product): Promise<void> => {
-  if (!db) return;
+  saveProduct: async (product: Product): Promise<void> => {
+    if (!db) return;
 
-  // 🔒 Limpieza defensiva: Firestore NO acepta undefined
-  const cleanProduct = JSON.parse(JSON.stringify(product));
+    const data: any = cleanData(product);
 
-  // Por si algún componente viejo lo sigue enviando
-  delete (cleanProduct as any).commissionPercentage;
+    // Si NO usás comisión por producto y querés ignorarla, dejá esta línea.
+    // Si querés guardarla por producto, comentá/eliminá el delete.
+    delete data.commissionPercentage;
 
-  await setDoc(
-    doc(db, COLLECTIONS.PRODUCTS, product.id),
-    cleanProduct
-  );
-},
+    await setDoc(
+      doc(db, COLLECTIONS.PRODUCTS, product.id),
+      data,
+      { merge: true } // ✅ evita pisar campos existentes (stock, etc.)
+    );
+  },
 
+  updateProductCost: async (productId: string, newCost: number): Promise<void> => {
+    if (!db) return;
+    const prodRef = doc(db, COLLECTIONS.PRODUCTS, productId);
+    await updateDoc(prodRef, { cost: newCost });
+  },
 
   deleteProduct: async (id: string): Promise<void> => {
     if (!db) return;
@@ -219,11 +231,7 @@ export const StorageService = {
   updateStock: async (productId: string, quantityChange: number): Promise<void> => {
     if (!db) return;
     const prodRef = doc(db, COLLECTIONS.PRODUCTS, productId);
-    const products = await StorageService.getProducts();
-    const product = products.find((p) => p.id === productId);
-    if (product) {
-      await updateDoc(prodRef, { stock: product.stock + quantityChange });
-    }
+    await updateDoc(prodRef, { stock: increment(quantityChange) }); // ✅ atómico
   },
 
   // --- SALES ---
@@ -235,6 +243,7 @@ export const StorageService = {
 
   addSale: async (sale: Sale): Promise<void> => {
     if (!db) return;
+
     await setDoc(
       doc(db, COLLECTIONS.SALES, sale.id),
       cleanData(sale),
@@ -302,4 +311,3 @@ export const StorageService = {
     }
   },
 };
-
