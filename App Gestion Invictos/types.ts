@@ -42,8 +42,9 @@ export interface Product {
   cost: number;
   stock: number;
   description?: string;
-  commissionPercentage?: number;
+  // ❌ commissionPercentage NO va acá
 }
+
 
 export interface SaleItem {
   productId: string;
