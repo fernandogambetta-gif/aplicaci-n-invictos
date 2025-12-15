@@ -68,10 +68,11 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       StorageService.getCategories(),
       StorageService.getProviders(),
     ]);
+
     setCategories(cats);
     setProviders(provs);
 
-    // Si no hay nada seleccionado, intentá setear defaults razonables
+    // Defaults si estaban vacíos
     setFormData((prev) => ({
       ...prev,
       category: prev.category || (cats.length > 0 ? cats[0].name : ''),
@@ -106,7 +107,6 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     const cost = Number(formData.cost ?? 0);
     const stock = Number(formData.stock ?? 0);
 
-    // Validación mínima
     if (!name || !category || !provider) return;
     if (!Number.isFinite(price) || price <= 0) return;
     if (!Number.isFinite(cost) || cost < 0) return;
@@ -124,7 +124,6 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       cost,
       stock,
       description: (formData.description as string) || '',
-      // ✅ NO la borres al editar/guardar
       commissionPercentage: formData.commissionPercentage,
     };
 
@@ -165,28 +164,26 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   };
 
   const handleSubmitRestock = async () => {
-  if (!restockProductId || restockQuantity <= 0) return;
+    if (!restockProductId || restockQuantity <= 0) return;
 
-  setIsSaving(true);
+    setIsSaving(true);
 
-  const product = products.find((p) => p.id === restockProductId);
-  if (product) {
-    // ✅ Si cambió el costo, actualizalo sin pisar el resto del documento
-    if (restockNewCost > 0 && restockNewCost !== product.cost) {
-      await StorageService.updateProductCost(product.id, restockNewCost);
+    const product = products.find((p) => p.id === restockProductId);
+    if (product) {
+      // ✅ costo sin pisar el documento completo
+      if (restockNewCost > 0 && restockNewCost !== product.cost) {
+        await StorageService.updateProductCost(product.id, restockNewCost);
+      }
+      // ✅ stock por delta (en tu StorageService es atómico con increment)
+      await StorageService.updateStock(product.id, restockQuantity);
     }
 
-    // ✅ Después subí stock por delta (atómico en Firestore con increment)
-    await StorageService.updateStock(product.id, restockQuantity);
-  }
+    await Promise.resolve(onUpdate());
 
-  await Promise.resolve(onUpdate());
-
-  setIsSaving(false);
-  setIsRestockModalOpen(false);
-  setRestockQuantity(0);
-};
-
+    setIsSaving(false);
+    setIsRestockModalOpen(false);
+    setRestockQuantity(0);
+  };
 
   // Category Logic
   const handleAddCategory = async () => {
@@ -246,6 +243,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
         <div className="flex flex-wrap gap-2">
           <button
+            type="button"
             onClick={() => StorageService.exportInventoryToCSV(products)}
             className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
           >
@@ -253,6 +251,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           </button>
 
           <button
+            type="button"
             onClick={() => handleOpenRestock()}
             className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
           >
@@ -262,6 +261,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           <div className="w-px bg-slate-300 mx-1 hidden md:block"></div>
 
           <button
+            type="button"
             onClick={() => setIsProviderModalOpen(true)}
             className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium shadow-sm"
           >
@@ -269,6 +269,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           </button>
 
           <button
+            type="button"
             onClick={() => setIsCategoryModalOpen(true)}
             className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium shadow-sm"
           >
@@ -276,6 +277,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           </button>
 
           <button
+            type="button"
             onClick={() => {
               resetForm();
               setIsModalOpen(true);
@@ -325,18 +327,10 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                 <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                   Categoría / Proveedor
                 </th>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                  Costo
-                </th>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                  Precio
-                </th>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
-                  Stock
-                </th>
-                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">
-                  Acciones
-                </th>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Costo</th>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Precio</th>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">Stock</th>
+                <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-right">Acciones</th>
               </tr>
             </thead>
 
@@ -374,6 +368,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                   <td className="px-6 py-4 text-right space-x-2 flex justify-end">
                     <button
+                      type="button"
                       onClick={() => handleOpenRestock(product)}
                       className="text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 transition-colors p-1.5 rounded"
                     >
@@ -381,6 +376,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     </button>
 
                     <button
+                      type="button"
                       onClick={() => handleEdit(product)}
                       className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors p-1.5 rounded"
                     >
@@ -388,6 +384,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     </button>
 
                     <button
+                      type="button"
                       onClick={() => handleDelete(product.id)}
                       className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
                     >
@@ -417,7 +414,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
               <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 <PackagePlus size={20} className="text-emerald-600" /> Ingresar Mercadería
               </h3>
-              <button onClick={() => setIsRestockModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsRestockModalOpen(false)} className="text-slate-400 hover:text-slate-600">
                 <X size={20} />
               </button>
             </div>
@@ -494,6 +491,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
               </div>
 
               <button
+                type="button"
                 onClick={handleSubmitRestock}
                 disabled={!selectedProductForRestock || restockQuantity <= 0 || isSaving}
                 className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
@@ -505,131 +503,13 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         </div>
       )}
 
-      {/* --- CATEGORY MODAL --- */}
-      {isCategoryModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                <FolderCog size={20} className="text-slate-700" /> Categorías
-              </h3>
-              <button onClick={() => setIsCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Nueva categoría..."
-                  className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  value={newCategoryName}
-                  onChange={(e) => setNewCategoryName(e.target.value)}
-                />
-                <button
-                  onClick={handleAddCategory}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
-                >
-                  <Plus size={18} /> Agregar
-                </button>
-              </div>
-
-              <div className="border border-slate-200 rounded-lg overflow-hidden">
-                {categories.length === 0 ? (
-                  <div className="p-4 text-sm text-slate-500">No hay categorías cargadas.</div>
-                ) : (
-                  <div className="divide-y divide-slate-100">
-                    {categories.map((cat) => (
-                      <div key={cat.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
-                        <span className="text-sm font-medium text-slate-800">{cat.name}</span>
-                        <button
-                          onClick={() => handleDeleteCategory(cat.id)}
-                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
-                        >
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="text-[11px] text-slate-400">
-                Tip: si eliminás una categoría usada por productos, esos productos seguirán teniendo el texto guardado (depende de tu
-                StorageService).
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* --- PROVIDER MODAL --- */}
-      {isProviderModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                <Briefcase size={20} className="text-slate-700" /> Proveedores
-              </h3>
-              <button onClick={() => setIsProviderModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Nuevo proveedor..."
-                  className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  value={newProviderName}
-                  onChange={(e) => setNewProviderName(e.target.value)}
-                />
-                <button
-                  onClick={handleAddProvider}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
-                >
-                  <Plus size={18} /> Agregar
-                </button>
-              </div>
-
-              <div className="border border-slate-200 rounded-lg overflow-hidden">
-                {providers.length === 0 ? (
-                  <div className="p-4 text-sm text-slate-500">No hay proveedores cargados.</div>
-                ) : (
-                  <div className="divide-y divide-slate-100">
-                    {providers.map((p) => (
-                      <div key={p.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
-                        <span className="text-sm font-medium text-slate-800">{p.name}</span>
-                        <button
-                          onClick={() => handleDeleteProvider(p.id)}
-                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
-                        >
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="text-[11px] text-slate-400">
-                Tip: si eliminás un proveedor usado por productos, esos productos seguirán teniendo el texto guardado (depende de tu
-                StorageService).
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* --- PRODUCT MODAL --- */}
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full overflow-hidden animate-fade-in-up">
             <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
               <h3 className="text-lg font-bold text-slate-800">{formData.id ? 'Editar Producto' : 'Nuevo Producto'}</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+              <button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600">
                 <X size={20} />
               </button>
             </div>
@@ -742,10 +622,11 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
             </div>
 
             <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
-              <button onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium">
+              <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium">
                 Cancelar
               </button>
               <button
+                type="button"
                 onClick={handleSave}
                 disabled={isSaving}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
@@ -756,9 +637,128 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           </div>
         </div>
       )}
+
+      {/* --- CATEGORY MODAL --- */}
+      {isCategoryModalOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <FolderCog size={20} className="text-slate-700" /> Categorías
+              </h3>
+              <button type="button" onClick={() => setIsCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Nueva categoría..."
+                  className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  value={newCategoryName}
+                  onChange={(e) => setNewCategoryName(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={handleAddCategory}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                >
+                  <Plus size={18} /> Agregar
+                </button>
+              </div>
+
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                {categories.length === 0 ? (
+                  <div className="p-4 text-sm text-slate-500">No hay categorías cargadas.</div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {categories.map((cat) => (
+                      <div key={cat.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
+                        <span className="text-sm font-medium text-slate-800">{cat.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteCategory(cat.id)}
+                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <p className="text-[11px] text-slate-400">
+                Tip: si eliminás una categoría usada por productos, los productos conservarán el texto guardado.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- PROVIDER MODAL --- */}
+      {isProviderModalOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
+            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Briefcase size={20} className="text-slate-700" /> Proveedores
+              </h3>
+              <button type="button" onClick={() => setIsProviderModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Nuevo proveedor..."
+                  className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  value={newProviderName}
+                  onChange={(e) => setNewProviderName(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={handleAddProvider}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                >
+                  <Plus size={18} /> Agregar
+                </button>
+              </div>
+
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                {providers.length === 0 ? (
+                  <div className="p-4 text-sm text-slate-500">No hay proveedores cargados.</div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {providers.map((p) => (
+                      <div key={p.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
+                        <span className="text-sm font-medium text-slate-800">{p.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteProvider(p.id)}
+                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <p className="text-[11px] text-slate-400">
+                Tip: si eliminás un proveedor usado por productos, los productos conservarán el texto guardado.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
 
 export default Inventory;
-
