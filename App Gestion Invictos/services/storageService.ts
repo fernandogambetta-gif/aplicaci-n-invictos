@@ -195,14 +195,21 @@ export const StorageService = {
     return mapDocs<Product>(snap);
   },
 
-  saveProduct: async (product: Product): Promise<void> => {
-    if (!db) return;
-    const data = cleanData(product); // 👈 elimina commissionPercentage si viene undefined
-    await setDoc(
-      doc(db, COLLECTIONS.PRODUCTS, product.id),
-      data,
-    );
-  },
+ saveProduct: async (product: Product): Promise<void> => {
+  if (!db) return;
+
+  // 🔒 Limpieza defensiva: Firestore NO acepta undefined
+  const cleanProduct = JSON.parse(JSON.stringify(product));
+
+  // Por si algún componente viejo lo sigue enviando
+  delete (cleanProduct as any).commissionPercentage;
+
+  await setDoc(
+    doc(db, COLLECTIONS.PRODUCTS, product.id),
+    cleanProduct
+  );
+},
+
 
   deleteProduct: async (id: string): Promise<void> => {
     if (!db) return;
