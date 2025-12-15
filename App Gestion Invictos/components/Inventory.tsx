@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Product, CategoryItem, ProviderItem } from '../types';
 import {
   Plus,
@@ -25,6 +26,12 @@ interface InventoryProps {
 }
 
 const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
+  // --- Portal helper (evita que el modal quede “tapado” por overflow/transform) ---
+  const Portal: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+    if (typeof document === 'undefined') return null;
+    return createPortal(children, document.body);
+  };
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -72,7 +79,6 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     setCategories(cats);
     setProviders(provs);
 
-    // Defaults si estaban vacíos
     setFormData((prev) => ({
       ...prev,
       category: prev.category || (cats.length > 0 ? cats[0].name : ''),
@@ -113,33 +119,34 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     if (!Number.isFinite(stock) || stock < 0) return;
 
     setIsSaving(true);
+    try {
+      const newProduct: Product = {
+        id: formData.id || Date.now().toString(),
+        code: (formData.code || 'S/C').trim() || 'S/C',
+        name,
+        category,
+        provider,
+        price,
+        cost,
+        stock,
+        description: (formData.description as string) || '',
+        commissionPercentage: formData.commissionPercentage,
+      };
 
-    const newProduct: Product = {
-      id: formData.id || Date.now().toString(),
-      code: (formData.code || 'S/C').trim() || 'S/C',
-      name,
-      category,
-      provider,
-      price,
-      cost,
-      stock,
-      description: (formData.description as string) || '',
-      commissionPercentage: formData.commissionPercentage,
-    };
+      await StorageService.saveProduct(newProduct);
+      await Promise.resolve(onUpdate());
 
-    await StorageService.saveProduct(newProduct);
-    await Promise.resolve(onUpdate());
-
-    setIsSaving(false);
-    setIsModalOpen(false);
-    resetForm();
+      setIsModalOpen(false);
+      resetForm();
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (confirm('¿Estás seguro de eliminar este producto?')) {
-      await StorageService.deleteProduct(id);
-      await Promise.resolve(onUpdate());
-    }
+    if (!confirm('¿Estás seguro de eliminar este producto?')) return;
+    await StorageService.deleteProduct(id);
+    await Promise.resolve(onUpdate());
   };
 
   const handleEdit = (product: Product) => {
@@ -167,22 +174,21 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     if (!restockProductId || restockQuantity <= 0) return;
 
     setIsSaving(true);
-
-    const product = products.find((p) => p.id === restockProductId);
-    if (product) {
-      // ✅ costo sin pisar el documento completo
-      if (restockNewCost > 0 && restockNewCost !== product.cost) {
-        await StorageService.updateProductCost(product.id, restockNewCost);
+    try {
+      const product = products.find((p) => p.id === restockProductId);
+      if (product) {
+        if (restockNewCost > 0 && restockNewCost !== product.cost) {
+          await StorageService.updateProductCost(product.id, restockNewCost);
+        }
+        await StorageService.updateStock(product.id, restockQuantity);
       }
-      // ✅ stock por delta (en tu StorageService es atómico con increment)
-      await StorageService.updateStock(product.id, restockQuantity);
+
+      await Promise.resolve(onUpdate());
+      setIsRestockModalOpen(false);
+      setRestockQuantity(0);
+    } finally {
+      setIsSaving(false);
     }
-
-    await Promise.resolve(onUpdate());
-
-    setIsSaving(false);
-    setIsRestockModalOpen(false);
-    setRestockQuantity(0);
   };
 
   // Category Logic
@@ -195,10 +201,9 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   };
 
   const handleDeleteCategory = async (id: string) => {
-    if (confirm('¿Eliminar categoría?')) {
-      await StorageService.deleteCategory(id);
-      await loadLists();
-    }
+    if (!confirm('¿Eliminar categoría?')) return;
+    await StorageService.deleteCategory(id);
+    await loadLists();
   };
 
   // Provider Logic
@@ -211,10 +216,9 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   };
 
   const handleDeleteProvider = async (id: string) => {
-    if (confirm('¿Eliminar proveedor?')) {
-      await StorageService.deleteProvider(id);
-      await loadLists();
-    }
+    if (!confirm('¿Eliminar proveedor?')) return;
+    await StorageService.deleteProvider(id);
+    await loadLists();
   };
 
   const filteredProducts = products.filter((p) => {
@@ -341,7 +345,9 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                   <td className="px-6 py-4">
                     <div className="font-medium text-slate-900">{product.name}</div>
-                    {product.description && <div className="text-xs text-slate-500">{product.description}</div>}
+                    {product.description && (
+                      <div className="text-xs text-slate-500">{product.description}</div>
+                    )}
                   </td>
 
                   <td className="px-6 py-4">
@@ -406,363 +412,401 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         </div>
       </div>
 
-      {/* --- RESTOCK MODAL --- */}
+      {/* --- RESTOCK MODAL (PORTAL) --- */}
       {isRestockModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                <PackagePlus size={20} className="text-emerald-600" /> Ingresar Mercadería
-              </h3>
-              <button type="button" onClick={() => setIsRestockModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-5">
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Producto</label>
-                <select
-                  className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white font-medium"
-                  value={restockProductId}
-                  onChange={(e) => {
-                    setRestockProductId(e.target.value);
-                    const p = products.find((prod) => prod.id === e.target.value);
-                    if (p) setRestockNewCost(Number(p.cost ?? 0));
-                  }}
+        <Portal>
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <PackagePlus size={20} className="text-emerald-600" /> Ingresar Mercadería
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setIsRestockModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600"
                 >
-                  <option value="">-- Seleccionar Producto --</option>
-                  {restockFilteredProducts.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} ({p.code})
-                    </option>
-                  ))}
-                </select>
-
-                <div className="mt-2 flex items-center gap-2">
-                  <Search size={14} className="text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Filtrar lista por nombre..."
-                    className="text-xs border-b border-slate-200 focus:border-indigo-500 focus:outline-none w-full py-1"
-                    value={restockSearch}
-                    onChange={(e) => setRestockSearch(e.target.value)}
-                  />
-                </div>
+                  <X size={20} />
+                </button>
               </div>
 
-              {selectedProductForRestock && (
-                <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm text-slate-500">Stock Actual:</span>
-                    <span className="font-bold text-slate-800 text-lg">{selectedProductForRestock.stock} u.</span>
-                  </div>
-                  <div className="flex justify-between items-center">
-                    <span className="text-sm text-slate-500">Costo Actual:</span>
-                    <span className="font-medium text-slate-700">${selectedProductForRestock.cost}</span>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-4">
+              <div className="p-6 space-y-5">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Cantidad a Ingresar</label>
-                  <input
-                    type="number"
-                    min="1"
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-lg font-bold text-emerald-600"
-                    value={restockQuantity}
-                    onChange={(e) => setRestockQuantity(parseInt(e.target.value, 10) || 0)}
-                  />
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Producto</label>
+                  <select
+                    className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white font-medium"
+                    value={restockProductId}
+                    onChange={(e) => {
+                      setRestockProductId(e.target.value);
+                      const p = products.find((prod) => prod.id === e.target.value);
+                      if (p) setRestockNewCost(Number(p.cost ?? 0));
+                    }}
+                  >
+                    <option value="">-- Seleccionar Producto --</option>
+                    {restockFilteredProducts.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.code})
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="mt-2 flex items-center gap-2">
+                    <Search size={14} className="text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Filtrar lista por nombre..."
+                      className="text-xs border-b border-slate-200 focus:border-indigo-500 focus:outline-none w-full py-1"
+                      value={restockSearch}
+                      onChange={(e) => setRestockSearch(e.target.value)}
+                    />
+                  </div>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Nuevo Costo (Unit.)</label>
-                  <input
-                    type="number"
-                    min="0"
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={restockNewCost}
-                    onChange={(e) => setRestockNewCost(parseFloat(e.target.value) || 0)}
-                    disabled={!selectedProductForRestock}
-                  />
-                  <p className="text-[10px] text-slate-400 mt-1">Opcional.</p>
+                {selectedProductForRestock && (
+                  <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-sm text-slate-500">Stock Actual:</span>
+                      <span className="font-bold text-slate-800 text-lg">
+                        {selectedProductForRestock.stock} u.
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm text-slate-500">Costo Actual:</span>
+                      <span className="font-medium text-slate-700">
+                        ${selectedProductForRestock.cost}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Cantidad a Ingresar
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-lg font-bold text-emerald-600"
+                      value={restockQuantity}
+                      onChange={(e) => setRestockQuantity(parseInt(e.target.value, 10) || 0)}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Nuevo Costo (Unit.)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      value={restockNewCost}
+                      onChange={(e) => setRestockNewCost(parseFloat(e.target.value) || 0)}
+                      disabled={!selectedProductForRestock}
+                    />
+                    <p className="text-[10px] text-slate-400 mt-1">Opcional.</p>
+                  </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={handleSubmitRestock}
+                  disabled={!selectedProductForRestock || restockQuantity <= 0 || isSaving}
+                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                >
+                  {isSaving ? <Loader2 className="animate-spin" /> : <ArrowRight size={20} />}{' '}
+                  Confirmar Ingreso
+                </button>
               </div>
-
-              <button
-                type="button"
-                onClick={handleSubmitRestock}
-                disabled={!selectedProductForRestock || restockQuantity <= 0 || isSaving}
-                className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-              >
-                {isSaving ? <Loader2 className="animate-spin" /> : <ArrowRight size={20} />} Confirmar Ingreso
-              </button>
             </div>
           </div>
-        </div>
+        </Portal>
       )}
 
-      {/* --- PRODUCT MODAL --- */}
+      {/* --- PRODUCT MODAL (PORTAL) --- */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full overflow-hidden animate-fade-in-up">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800">{formData.id ? 'Editar Producto' : 'Nuevo Producto'}</h3>
-              <button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
+        <Portal>
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full overflow-hidden animate-fade-in-up">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="text-lg font-bold text-slate-800">
+                  {formData.id ? 'Editar Producto' : 'Nuevo Producto'}
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  <X size={20} />
+                </button>
+              </div>
 
-            <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-4">
+              <div className="p-6 space-y-4 max-h-[80vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
+                      <Barcode size={14} /> Código / SKU
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Ejp: A-100"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      value={formData.code || ''}
+                      onChange={(e) => setFormData({ ...formData, code: e.target.value })}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
+                      <Truck size={14} /> Proveedor
+                    </label>
+                    <select
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
+                      value={formData.provider || ''}
+                      onChange={(e) => setFormData({ ...formData, provider: e.target.value })}
+                    >
+                      <option value="">Seleccionar Proveedor</option>
+                      {providers.map((p) => (
+                        <option key={p.id} value={p.name}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Nombre del Producto
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      value={formData.name || ''}
+                      onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
+                      <Tag size={14} /> Categoría
+                    </label>
+                    <select
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
+                      value={formData.category || ''}
+                      onChange={(e) => setFormData({ ...formData, category: e.target.value })}
+                    >
+                      {categories.length === 0 && <option value="">Sin Categorías</option>}
+                      {categories.map((cat) => (
+                        <option key={cat.id} value={cat.name}>
+                          {cat.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Costo ($)</label>
+                    <input
+                      type="number"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      value={Number(formData.cost ?? 0)}
+                      onChange={(e) => setFormData({ ...formData, cost: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Precio ($)</label>
+                    <input
+                      type="number"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      value={Number(formData.price ?? 0)}
+                      onChange={(e) => setFormData({ ...formData, price: parseFloat(e.target.value) || 0 })}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">
+                      Stock Inicial
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                      value={Number(formData.stock ?? 0)}
+                      onChange={(e) => setFormData({ ...formData, stock: parseInt(e.target.value, 10) || 0 })}
+                    />
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                    <Barcode size={14} /> Código / SKU
-                  </label>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
                   <input
                     type="text"
-                    placeholder="Ejp: A-100"
                     className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={formData.code || ''}
-                    onChange={(e) => setFormData({ ...formData, code: e.target.value })}
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                    <Truck size={14} /> Proveedor
-                  </label>
-                  <select
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-                    value={formData.provider || ''}
-                    onChange={(e) => setFormData({ ...formData, provider: e.target.value })}
-                  >
-                    <option value="">Seleccionar Proveedor</option>
-                    {providers.map((p) => (
-                      <option key={p.id} value={p.name}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4">
-                <div className="col-span-2">
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Nombre del Producto</label>
-                  <input
-                    type="text"
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={formData.name || ''}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                    <Tag size={14} /> Categoría
-                  </label>
-                  <select
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-                    value={formData.category || ''}
-                    onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                  >
-                    {categories.length === 0 && <option value="">Sin Categorías</option>}
-                    {categories.map((cat) => (
-                      <option key={cat.id} value={cat.name}>
-                        {cat.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Costo ($)</label>
-                  <input
-                    type="number"
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={Number(formData.cost ?? 0)}
-                    onChange={(e) => setFormData({ ...formData, cost: parseFloat(e.target.value) || 0 })}
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Precio ($)</label>
-                  <input
-                    type="number"
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={Number(formData.price ?? 0)}
-                    onChange={(e) => setFormData({ ...formData, price: parseFloat(e.target.value) || 0 })}
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Stock Inicial</label>
-                  <input
-                    type="number"
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={Number(formData.stock ?? 0)}
-                    onChange={(e) => setFormData({ ...formData, stock: parseInt(e.target.value, 10) || 0 })}
+                    value={(formData.description as string) || ''}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                   />
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Descripción</label>
-                <input
-                  type="text"
-                  className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  value={(formData.description as string) || ''}
-                  onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                />
+              <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSave}
+                  disabled={isSaving}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                >
+                  {isSaving ? <Loader2 className="animate-spin" /> : <Save size={18} />} Guardar
+                </button>
               </div>
-            </div>
-
-            <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-end gap-3">
-              <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium">
-                Cancelar
-              </button>
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={isSaving}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
-              >
-                {isSaving ? <Loader2 className="animate-spin" /> : <Save size={18} />} Guardar
-              </button>
             </div>
           </div>
-        </div>
+        </Portal>
       )}
 
-      {/* --- CATEGORY MODAL --- */}
+      {/* --- CATEGORY MODAL (PORTAL) --- */}
       {isCategoryModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                <FolderCog size={20} className="text-slate-700" /> Categorías
-              </h3>
-              <button type="button" onClick={() => setIsCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Nueva categoría..."
-                  className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  value={newCategoryName}
-                  onChange={(e) => setNewCategoryName(e.target.value)}
-                />
+        <Portal>
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <FolderCog size={20} className="text-slate-700" /> Categorías
+                </h3>
                 <button
                   type="button"
-                  onClick={handleAddCategory}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  onClick={() => setIsCategoryModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600"
                 >
-                  <Plus size={18} /> Agregar
+                  <X size={20} />
                 </button>
               </div>
 
-              <div className="border border-slate-200 rounded-lg overflow-hidden">
-                {categories.length === 0 ? (
-                  <div className="p-4 text-sm text-slate-500">No hay categorías cargadas.</div>
-                ) : (
-                  <div className="divide-y divide-slate-100">
-                    {categories.map((cat) => (
-                      <div key={cat.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
-                        <span className="text-sm font-medium text-slate-800">{cat.name}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteCategory(cat.id)}
-                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
-                        >
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <div className="p-6 space-y-4">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Nueva categoría..."
+                    className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    value={newCategoryName}
+                    onChange={(e) => setNewCategoryName(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCategory}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  >
+                    <Plus size={18} /> Agregar
+                  </button>
+                </div>
 
-              <p className="text-[11px] text-slate-400">
-                Tip: si eliminás una categoría usada por productos, los productos conservarán el texto guardado.
-              </p>
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                  {categories.length === 0 ? (
+                    <div className="p-4 text-sm text-slate-500">No hay categorías cargadas.</div>
+                  ) : (
+                    <div className="divide-y divide-slate-100">
+                      {categories.map((cat) => (
+                        <div key={cat.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
+                          <span className="text-sm font-medium text-slate-800">{cat.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCategory(cat.id)}
+                            className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-400">
+                  Tip: si eliminás una categoría usada por productos, los productos conservarán el texto guardado.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        </Portal>
       )}
 
-      {/* --- PROVIDER MODAL --- */}
+      {/* --- PROVIDER MODAL (PORTAL) --- */}
       {isProviderModalOpen && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-            <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                <Briefcase size={20} className="text-slate-700" /> Proveedores
-              </h3>
-              <button type="button" onClick={() => setIsProviderModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                <X size={20} />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Nuevo proveedor..."
-                  className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                  value={newProviderName}
-                  onChange={(e) => setNewProviderName(e.target.value)}
-                />
+        <Portal>
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
+            <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
+              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                  <Briefcase size={20} className="text-slate-700" /> Proveedores
+                </h3>
                 <button
                   type="button"
-                  onClick={handleAddProvider}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  onClick={() => setIsProviderModalOpen(false)}
+                  className="text-slate-400 hover:text-slate-600"
                 >
-                  <Plus size={18} /> Agregar
+                  <X size={20} />
                 </button>
               </div>
 
-              <div className="border border-slate-200 rounded-lg overflow-hidden">
-                {providers.length === 0 ? (
-                  <div className="p-4 text-sm text-slate-500">No hay proveedores cargados.</div>
-                ) : (
-                  <div className="divide-y divide-slate-100">
-                    {providers.map((p) => (
-                      <div key={p.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
-                        <span className="text-sm font-medium text-slate-800">{p.name}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteProvider(p.id)}
-                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
-                        >
-                          <Trash2 size={18} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <div className="p-6 space-y-4">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Nuevo proveedor..."
+                    className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    value={newProviderName}
+                    onChange={(e) => setNewProviderName(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddProvider}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
+                  >
+                    <Plus size={18} /> Agregar
+                  </button>
+                </div>
 
-              <p className="text-[11px] text-slate-400">
-                Tip: si eliminás un proveedor usado por productos, los productos conservarán el texto guardado.
-              </p>
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
+                  {providers.length === 0 ? (
+                    <div className="p-4 text-sm text-slate-500">No hay proveedores cargados.</div>
+                  ) : (
+                    <div className="divide-y divide-slate-100">
+                      {providers.map((p) => (
+                        <div key={p.id} className="flex items-center justify-between p-3 hover:bg-slate-50">
+                          <span className="text-sm font-medium text-slate-800">{p.name}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteProvider(p.id)}
+                            className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
+                          >
+                            <Trash2 size={18} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-400">
+                  Tip: si eliminás un proveedor usado por productos, los productos conservarán el texto guardado.
+                </p>
+              </div>
             </div>
           </div>
-        </div>
+        </Portal>
       )}
     </div>
-  );
-};
-
-export default Inventory;
-
   );
 };
 
