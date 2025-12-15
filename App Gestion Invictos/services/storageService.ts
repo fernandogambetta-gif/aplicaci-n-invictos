@@ -6,8 +6,6 @@ import {
   doc,
   setDoc,
   deleteDoc,
-  query,
-  where,
   updateDoc,
 } from 'firebase/firestore';
 
@@ -35,7 +33,24 @@ const INITIAL_USERS: User[] = [
   { id: 'u2', name: 'Vendedor 1', role: 'seller', pin: '0000', commissionPercentage: 3, security: DEFAULT_SECURITY },
 ];
 
-// --- HELPER TO MAP FIRESTORE DOCS ---
+// --- HELPERS ---
+
+// 1) Elimina keys con undefined (Firestore NO acepta undefined)
+const cleanUndefined = <T extends Record<string, any>>(obj: T): T => {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v !== undefined),
+  ) as T;
+};
+
+// 2) Limpia un Product por si alguien le mete commissionPercentage (no debe ir)
+const sanitizeProductForFirestore = (p: Product): Product => {
+  const clone: any = { ...p };
+  // Si por error viene, lo sacamos para evitar undefined / conflicto de modelo
+  if ('commissionPercentage' in clone) delete clone.commissionPercentage;
+  return cleanUndefined(clone);
+};
+
+// 3) Map docs -> objects con id
 const mapDocs = <T>(snapshot: any): T[] => {
   return snapshot.docs.map((d: any) => ({ ...d.data(), id: d.id })) as T[];
 };
@@ -48,20 +63,25 @@ export const StorageService = {
     const users = mapDocs<User>(snap);
 
     if (users.length === 0) {
-      await Promise.all(INITIAL_USERS.map((u) => setDoc(doc(db, COLLECTIONS.USERS, u.id), u)));
+      await Promise.all(
+        INITIAL_USERS.map((u) => setDoc(doc(db, COLLECTIONS.USERS, u.id), cleanUndefined(u as any))),
+      );
       return INITIAL_USERS;
     }
+
     return users.map((u) => ({ ...u, security: u.security || { ...DEFAULT_SECURITY } }));
   },
 
   addUser: async (user: User): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.USERS, user.id), { ...user, security: { ...DEFAULT_SECURITY } });
+    const payload = cleanUndefined({ ...user, security: { ...DEFAULT_SECURITY } } as any);
+    await setDoc(doc(db, COLLECTIONS.USERS, user.id), payload);
   },
 
   updateUser: async (updatedUser: User): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.USERS, updatedUser.id), updatedUser, { merge: true });
+    const payload = cleanUndefined(updatedUser as any);
+    await setDoc(doc(db, COLLECTIONS.USERS, updatedUser.id), payload, { merge: true });
   },
 
   deleteUser: async (userId: string): Promise<void> => {
@@ -92,7 +112,7 @@ export const StorageService = {
       }
     }
 
-    await updateDoc(userRef, { security: user.security });
+    await updateDoc(userRef, { security: cleanUndefined(user.security as any) });
     return user;
   },
 
@@ -118,7 +138,8 @@ export const StorageService = {
 
   saveConfig: async (config: AppConfig): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.CONFIG, 'main'), config);
+    const payload = cleanUndefined(config as any);
+    await setDoc(doc(db, COLLECTIONS.CONFIG, 'main'), payload);
   },
 
   // --- CATEGORIES ---
@@ -130,7 +151,8 @@ export const StorageService = {
 
   saveCategory: async (category: CategoryItem): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.CATEGORIES, category.id), category);
+    const payload = cleanUndefined(category as any);
+    await setDoc(doc(db, COLLECTIONS.CATEGORIES, category.id), payload);
   },
 
   deleteCategory: async (id: string): Promise<void> => {
@@ -147,7 +169,8 @@ export const StorageService = {
 
   saveProvider: async (provider: ProviderItem): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.PROVIDERS, provider.id), provider);
+    const payload = cleanUndefined(provider as any);
+    await setDoc(doc(db, COLLECTIONS.PROVIDERS, provider.id), payload);
   },
 
   deleteProvider: async (id: string): Promise<void> => {
@@ -164,7 +187,8 @@ export const StorageService = {
 
   saveProduct: async (product: Product): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.PRODUCTS, product.id), product);
+    const payload = sanitizeProductForFirestore(product);
+    await setDoc(doc(db, COLLECTIONS.PRODUCTS, product.id), payload);
   },
 
   deleteProduct: async (id: string): Promise<void> => {
@@ -191,7 +215,13 @@ export const StorageService = {
 
   addSale: async (sale: Sale): Promise<void> => {
     if (!db) return;
-    await setDoc(doc(db, COLLECTIONS.SALES, sale.id), sale);
+
+    const safeSale: any = {
+      ...sale,
+      items: (sale.items || []).map((it: any) => cleanUndefined(it)),
+    };
+
+    await setDoc(doc(db, COLLECTIONS.SALES, sale.id), cleanUndefined(safeSale));
 
     for (const item of sale.items) {
       await StorageService.updateStock(item.productId, -item.quantity);
@@ -213,12 +243,12 @@ export const StorageService = {
   exportSalesToCSV: (sales: Sale[]) => {
     if (!sales.length) return;
     const headers = ['ID Venta,Fecha,Vendedor,Producto,Cantidad,Precio Unitario,Subtotal,Total Venta,Metodo Pago'];
-    const rows = sales.flatMap((sale) => {
-      return sale.items.map((item) => {
+    const rows = sales.flatMap((sale) =>
+      sale.items.map((item) => {
         const date = new Date(sale.timestamp).toLocaleString().replace(',', '');
         return `${sale.id},"${date}","${sale.userName}","${item.productName}",${item.quantity},${item.priceAtSale},${item.subtotal},${sale.total},${sale.paymentMethod}`;
-      });
-    });
+      }),
+    );
     const csvContent = headers.concat(rows).join('\n');
     StorageService.downloadCSV(csvContent, 'reporte_ventas.csv');
   },
@@ -227,9 +257,7 @@ export const StorageService = {
     if (!products.length) return;
     const headers = ['Codigo,Producto,Categoria,Proveedor,Costo,Precio,Stock,Descripcion'];
     const rows = products.map((p) => {
-      return `${p.code},"${p.name}","${p.category}","${p.provider}",${p.cost},${p.price},${p.stock},"${
-        p.description || ''
-      }"`;
+      return `${p.code},"${p.name}","${p.category}","${p.provider}",${p.cost},${p.price},${p.stock},"${p.description || ''}"`;
     });
     const csvContent = headers.concat(rows).join('\n');
     StorageService.downloadCSV(csvContent, 'inventario_invictos.csv');
@@ -253,6 +281,12 @@ export const StorageService = {
         "Al usar Base de Datos en la Nube, 'resetear' datos locales no elimina la base de datos real. Debes borrar las colecciones en Firebase Console.",
       )
     ) {
+      window.location.reload();
+    }
+  },
+};
+
+
       window.location.reload();
     }
   },
