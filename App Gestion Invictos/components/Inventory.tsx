@@ -165,26 +165,28 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   };
 
   const handleSubmitRestock = async () => {
-    if (!restockProductId || restockQuantity <= 0) return;
+  if (!restockProductId || restockQuantity <= 0) return;
 
-    setIsSaving(true);
+  setIsSaving(true);
 
-    const product = products.find((p) => p.id === restockProductId);
-    if (product) {
-      // ✅ Primero actualizá costo (si cambió), sin tocar stock manualmente
-      if (restockNewCost > 0 && restockNewCost !== product.cost) {
-        await StorageService.saveProduct({ ...product, cost: restockNewCost });
-      }
-      // ✅ Después subí stock por delta
-      await StorageService.updateStock(product.id, restockQuantity);
+  const product = products.find((p) => p.id === restockProductId);
+  if (product) {
+    // ✅ Si cambió el costo, actualizalo sin pisar el resto del documento
+    if (restockNewCost > 0 && restockNewCost !== product.cost) {
+      await StorageService.updateProductCost(product.id, restockNewCost);
     }
 
-    await Promise.resolve(onUpdate());
+    // ✅ Después subí stock por delta (atómico en Firestore con increment)
+    await StorageService.updateStock(product.id, restockQuantity);
+  }
 
-    setIsSaving(false);
-    setIsRestockModalOpen(false);
-    setRestockQuantity(0);
-  };
+  await Promise.resolve(onUpdate());
+
+  setIsSaving(false);
+  setIsRestockModalOpen(false);
+  setRestockQuantity(0);
+};
+
 
   // Category Logic
   const handleAddCategory = async () => {
