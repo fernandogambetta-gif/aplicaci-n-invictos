@@ -762,3 +762,8 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 };
 
 export default Inventory;
+
+  );
+};
+
+export default Inventory;
