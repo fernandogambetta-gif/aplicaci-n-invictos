@@ -1,5 +1,4 @@
 import { Product, Sale, User, AppConfig, CategoryItem, ProviderItem, UserSecurity } from '../types';
-
 import {
   collection,
   getDocs,
@@ -8,8 +7,14 @@ import {
   deleteDoc,
   updateDoc,
 } from 'firebase/firestore';
-
 import { db } from './firebase';
+
+// 🔹 Helper: quita todas las propiedades con valor undefined
+const cleanData = <T extends Record<string, any>>(data: T): T => {
+  return Object.fromEntries(
+    Object.entries(data).filter(([_, v]) => v !== undefined)
+  ) as T;
+};
 
 // Collections
 const COLLECTIONS = {
@@ -33,24 +38,7 @@ const INITIAL_USERS: User[] = [
   { id: 'u2', name: 'Vendedor 1', role: 'seller', pin: '0000', commissionPercentage: 3, security: DEFAULT_SECURITY },
 ];
 
-// --- HELPERS ---
-
-// 1) Elimina keys con undefined (Firestore NO acepta undefined)
-const cleanUndefined = <T extends Record<string, any>>(obj: T): T => {
-  return Object.fromEntries(
-    Object.entries(obj).filter(([, v]) => v !== undefined),
-  ) as T;
-};
-
-// 2) Limpia un Product por si alguien le mete commissionPercentage (no debe ir)
-const sanitizeProductForFirestore = (p: Product): Product => {
-  const clone: any = { ...p };
-  // Si por error viene, lo sacamos para evitar undefined / conflicto de modelo
-  if ('commissionPercentage' in clone) delete clone.commissionPercentage;
-  return cleanUndefined(clone);
-};
-
-// 3) Map docs -> objects con id
+// --- HELPER TO MAP FIRESTORE DOCS ---
 const mapDocs = <T>(snapshot: any): T[] => {
   return snapshot.docs.map((d: any) => ({ ...d.data(), id: d.id })) as T[];
 };
@@ -64,24 +52,30 @@ export const StorageService = {
 
     if (users.length === 0) {
       await Promise.all(
-        INITIAL_USERS.map((u) => setDoc(doc(db, COLLECTIONS.USERS, u.id), cleanUndefined(u as any))),
+        INITIAL_USERS.map((u) =>
+          setDoc(doc(db, COLLECTIONS.USERS, u.id), cleanData(u))
+        )
       );
       return INITIAL_USERS;
     }
-
     return users.map((u) => ({ ...u, security: u.security || { ...DEFAULT_SECURITY } }));
   },
 
   addUser: async (user: User): Promise<void> => {
     if (!db) return;
-    const payload = cleanUndefined({ ...user, security: { ...DEFAULT_SECURITY } } as any);
-    await setDoc(doc(db, COLLECTIONS.USERS, user.id), payload);
+    await setDoc(
+      doc(db, COLLECTIONS.USERS, user.id),
+      cleanData({ ...user, security: { ...DEFAULT_SECURITY } })
+    );
   },
 
   updateUser: async (updatedUser: User): Promise<void> => {
     if (!db) return;
-    const payload = cleanUndefined(updatedUser as any);
-    await setDoc(doc(db, COLLECTIONS.USERS, updatedUser.id), payload, { merge: true });
+    await setDoc(
+      doc(db, COLLECTIONS.USERS, updatedUser.id),
+      cleanData(updatedUser),
+      { merge: true }
+    );
   },
 
   deleteUser: async (userId: string): Promise<void> => {
@@ -112,20 +106,20 @@ export const StorageService = {
       }
     }
 
-    await updateDoc(userRef, { security: cleanUndefined(user.security as any) });
+    await updateDoc(userRef, cleanData({ security: user.security }));
     return user;
   },
 
   resetAttempts: async (userId: string) => {
     if (!db) return;
     const userRef = doc(db, COLLECTIONS.USERS, userId);
-    await updateDoc(userRef, { security: { ...DEFAULT_SECURITY } });
+    await updateDoc(userRef, cleanData({ security: { ...DEFAULT_SECURITY } }));
   },
 
   unlockUser: async (userId: string) => {
     if (!db) return;
     const userRef = doc(db, COLLECTIONS.USERS, userId);
-    await updateDoc(userRef, { security: { ...DEFAULT_SECURITY } });
+    await updateDoc(userRef, cleanData({ security: { ...DEFAULT_SECURITY } }));
   },
 
   // --- CONFIG ---
@@ -138,8 +132,10 @@ export const StorageService = {
 
   saveConfig: async (config: AppConfig): Promise<void> => {
     if (!db) return;
-    const payload = cleanUndefined(config as any);
-    await setDoc(doc(db, COLLECTIONS.CONFIG, 'main'), payload);
+    await setDoc(
+      doc(db, COLLECTIONS.CONFIG, 'main'),
+      cleanData(config)
+    );
   },
 
   // --- CATEGORIES ---
@@ -151,8 +147,10 @@ export const StorageService = {
 
   saveCategory: async (category: CategoryItem): Promise<void> => {
     if (!db) return;
-    const payload = cleanUndefined(category as any);
-    await setDoc(doc(db, COLLECTIONS.CATEGORIES, category.id), payload);
+    await setDoc(
+      doc(db, COLLECTIONS.CATEGORIES, category.id),
+      cleanData(category)
+    );
   },
 
   deleteCategory: async (id: string): Promise<void> => {
@@ -169,8 +167,10 @@ export const StorageService = {
 
   saveProvider: async (provider: ProviderItem): Promise<void> => {
     if (!db) return;
-    const payload = cleanUndefined(provider as any);
-    await setDoc(doc(db, COLLECTIONS.PROVIDERS, provider.id), payload);
+    await setDoc(
+      doc(db, COLLECTIONS.PROVIDERS, provider.id),
+      cleanData(provider)
+    );
   },
 
   deleteProvider: async (id: string): Promise<void> => {
@@ -187,8 +187,12 @@ export const StorageService = {
 
   saveProduct: async (product: Product): Promise<void> => {
     if (!db) return;
-    const payload = sanitizeProductForFirestore(product);
-    await setDoc(doc(db, COLLECTIONS.PRODUCTS, product.id), payload);
+    // 🔹 Limpiamos cualquier campo extra / undefined (como commissionPercentage)
+    const safeProduct = cleanData(product as any);
+    await setDoc(
+      doc(db, COLLECTIONS.PRODUCTS, product.id),
+      safeProduct
+    );
   },
 
   deleteProduct: async (id: string): Promise<void> => {
@@ -202,7 +206,10 @@ export const StorageService = {
     const products = await StorageService.getProducts();
     const product = products.find((p) => p.id === productId);
     if (product) {
-      await updateDoc(prodRef, { stock: product.stock + quantityChange });
+      await updateDoc(
+        prodRef,
+        cleanData({ stock: product.stock + quantityChange })
+      );
     }
   },
 
@@ -216,12 +223,16 @@ export const StorageService = {
   addSale: async (sale: Sale): Promise<void> => {
     if (!db) return;
 
-    const safeSale: any = {
+    // 🔹 Limpiamos posibles commissionAmount undefined en items, etc.
+    const safeSale: Sale = {
       ...sale,
-      items: (sale.items || []).map((it: any) => cleanUndefined(it)),
+      items: sale.items.map((item) => cleanData(item)) as any,
     };
 
-    await setDoc(doc(db, COLLECTIONS.SALES, sale.id), cleanUndefined(safeSale));
+    await setDoc(
+      doc(db, COLLECTIONS.SALES, sale.id),
+      cleanData(safeSale as any)
+    );
 
     for (const item of sale.items) {
       await StorageService.updateStock(item.productId, -item.quantity);
@@ -231,10 +242,13 @@ export const StorageService = {
   markCommissionsAsPaid: async (saleIds: string[]): Promise<void> => {
     if (!db) return;
     const batchPromises = saleIds.map((id) =>
-      updateDoc(doc(db, COLLECTIONS.SALES, id), {
-        commissionPaid: true,
-        commissionPaidDate: Date.now(),
-      }),
+      updateDoc(
+        doc(db, COLLECTIONS.SALES, id),
+        cleanData({
+          commissionPaid: true,
+          commissionPaidDate: Date.now(),
+        })
+      )
     );
     await Promise.all(batchPromises);
   },
@@ -243,12 +257,12 @@ export const StorageService = {
   exportSalesToCSV: (sales: Sale[]) => {
     if (!sales.length) return;
     const headers = ['ID Venta,Fecha,Vendedor,Producto,Cantidad,Precio Unitario,Subtotal,Total Venta,Metodo Pago'];
-    const rows = sales.flatMap((sale) =>
-      sale.items.map((item) => {
+    const rows = sales.flatMap((sale) => {
+      return sale.items.map((item) => {
         const date = new Date(sale.timestamp).toLocaleString().replace(',', '');
         return `${sale.id},"${date}","${sale.userName}","${item.productName}",${item.quantity},${item.priceAtSale},${item.subtotal},${sale.total},${sale.paymentMethod}`;
-      }),
-    );
+      });
+    });
     const csvContent = headers.concat(rows).join('\n');
     StorageService.downloadCSV(csvContent, 'reporte_ventas.csv');
   },
@@ -286,8 +300,3 @@ export const StorageService = {
   },
 };
 
-
-      window.location.reload();
-    }
-  },
-};
