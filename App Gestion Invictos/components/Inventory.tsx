@@ -25,13 +25,16 @@ interface InventoryProps {
   onUpdate: () => void | Promise<void>;
 }
 
-const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
-  // --- Portal helper (evita que el modal quede “tapado” por overflow/transform) ---
-  const Portal: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    if (typeof document === 'undefined') return null;
-    return createPortal(children, document.body);
-  };
+/**
+ * ✅ Portal FUERA del componente:
+ * evita que el modal se desmonte/monta en cada render y pierda el foco al escribir.
+ */
+const Portal: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  if (typeof document === 'undefined') return null;
+  return createPortal(children, document.body);
+};
 
+const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -466,24 +469,18 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                   <div className="bg-slate-50 p-4 rounded-lg border border-slate-100">
                     <div className="flex justify-between items-center mb-2">
                       <span className="text-sm text-slate-500">Stock Actual:</span>
-                      <span className="font-bold text-slate-800 text-lg">
-                        {selectedProductForRestock.stock} u.
-                      </span>
+                      <span className="font-bold text-slate-800 text-lg">{selectedProductForRestock.stock} u.</span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-sm text-slate-500">Costo Actual:</span>
-                      <span className="font-medium text-slate-700">
-                        ${selectedProductForRestock.cost}
-                      </span>
+                      <span className="font-medium text-slate-700">${selectedProductForRestock.cost}</span>
                     </div>
                   </div>
                 )}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                      Cantidad a Ingresar
-                    </label>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Cantidad a Ingresar</label>
                     <input
                       type="number"
                       min="1"
@@ -494,9 +491,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                      Nuevo Costo (Unit.)
-                    </label>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Nuevo Costo (Unit.)</label>
                     <input
                       type="number"
                       min="0"
@@ -515,8 +510,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                   disabled={!selectedProductForRestock || restockQuantity <= 0 || isSaving}
                   className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
-                  {isSaving ? <Loader2 className="animate-spin" /> : <ArrowRight size={20} />}{' '}
-                  Confirmar Ingreso
+                  {isSaving ? <Loader2 className="animate-spin" /> : <ArrowRight size={20} />} Confirmar Ingreso
                 </button>
               </div>
             </div>
@@ -578,9 +572,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                 <div className="grid grid-cols-3 gap-4">
                   <div className="col-span-2">
-                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                      Nombre del Producto
-                    </label>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Nombre del Producto</label>
                     <input
                       type="text"
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
@@ -630,9 +622,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">
-                      Stock Inicial
-                    </label>
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Stock Inicial</label>
                     <input
                       type="number"
                       className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
@@ -811,3 +801,4 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 };
 
 export default Inventory;
+
