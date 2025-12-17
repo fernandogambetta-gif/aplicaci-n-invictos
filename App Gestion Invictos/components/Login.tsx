@@ -319,7 +319,3 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
 export default Login;
 
-  );
-};
-
-export default Login;
