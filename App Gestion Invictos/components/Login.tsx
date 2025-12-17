@@ -7,7 +7,7 @@ interface LoginProps {
   onLogin: (user: User) => void;
 }
 
-// 🔥 Cambiá este string para confirmar que estás viendo el deployment correcto
+// 🔥 Cambiá este string  para confirmar que estás viendo el deployment correcto
 const BUILD_TAG = 'LOGIN_BUILD_2025-12-17_01';
 
 const Login: React.FC<LoginProps> = ({ onLogin }) => {
