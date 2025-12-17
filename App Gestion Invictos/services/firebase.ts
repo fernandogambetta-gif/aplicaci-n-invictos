@@ -9,32 +9,31 @@ const projectId = import.meta.env.VITE_FIREBASE_PROJECT_ID as string | undefined
 let app: FirebaseApp | null = null;
 let db: Firestore | null = null;
 
-if (apiKey && authDomain && projectId) {
-  // ✅ Evita "Firebase App named '[DEFAULT]' already exists"
-  app = getApps().length ? getApps()[0] : initializeApp({ apiKey, authDomain, projectId });
+// ✅ Log de diagnóstico (NO imprime apiKey completa)
+console.log('🔥 FIREBASE ENV CHECK', {
+  hasApiKey: !!apiKey,
+  hasAuthDomain: !!authDomain,
+  hasProjectId: !!projectId,
+  projectId,
+  authDomain,
+});
 
-  // ✅ Firestore default (lo correcto si no usás multi-database)
+if (apiKey && authDomain && projectId) {
+  // ✅ Evita inicializar Firebase dos veces (HMR / múltiples imports)
+  app = getApps().length
+    ? getApps()[0]
+    : initializeApp({ apiKey, authDomain, projectId });
+
+  // ✅ Firestore default database
   db = getFirestore(app);
 
-  // ✅ Log para confirmar el proyecto real en runtime
-  console.log('✅ Firebase initialized:', {
-    envProjectId: projectId,
-    appProjectId: app.options.projectId,
-    authDomain: app.options.authDomain,
-  });
-
-  // Persistencia offline (si falla, solo avisa)
+  // ✅ Persistencia offline (si falla, no rompe)
   enableIndexedDbPersistence(db).catch((err: any) => {
-    console.warn('IndexedDB persistence disabled:', err?.code || err);
+    console.warn('⚠️ IndexedDB persistence disabled:', err?.code || err);
   });
 } else {
-  console.error('❌ Firebase ENV missing:', {
-    hasApiKey: !!apiKey,
-    hasAuthDomain: !!authDomain,
-    hasProjectId: !!projectId,
-  });
+  console.warn('⚠️ Firebase NO inicializado: faltan env vars en Vercel (Production/Preview).');
 }
 
 export { db };
-
 
