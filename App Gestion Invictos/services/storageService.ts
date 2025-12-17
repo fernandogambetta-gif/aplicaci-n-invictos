@@ -45,6 +45,10 @@ const DEFAULT_SECURITY: UserSecurity = {
   isPermanentlyBlocked: false,
 };
 
+/**
+ * ⚠️ Se dejan por si querés "seed" manual en desarrollo,
+ * pero NO se usan automáticamente en producción.
+ */
 const INITIAL_USERS: User[] = [
   { id: 'u1', name: 'Administrador', role: 'admin', pin: '1234', security: { ...DEFAULT_SECURITY } },
   { id: 'u2', name: 'Vendedor 1', role: 'seller', pin: '0000', commissionPercentage: 3, security: { ...DEFAULT_SECURITY } },
@@ -57,12 +61,28 @@ const mapDocs = <T>(snapshot: any): T[] =>
 export const StorageService = {
   // --- USERS ---
   getUsers: async (): Promise<User[]> => {
-    if (!db) return INITIAL_USERS;
+    if (!db) {
+      console.error('[StorageService.getUsers] Firestore db NO inicializado. Revisar services/firebase.ts y env vars en Vercel.');
+      return [];
+    }
 
     const snap = await getDocs(collection(db, COLLECTIONS.USERS));
-    const users = mapDocs<User>(snap);
+    const users = mapDocs<User>(snap).map((u) => ({
+      ...u,
+      security: u.security || { ...DEFAULT_SECURITY },
+    }));
 
-    if (users.length === 0) {
+    /**
+     * ❌ IMPORTANTE:
+     * Antes: si users.length === 0, sembraba INITIAL_USERS automáticamente.
+     * Eso genera "usuarios fantasma" cuando estás apuntando al proyecto equivocado o la colección está vacía.
+     *
+     * ✅ Si querés sembrar SOLO en desarrollo, activalo con:
+     * VITE_SEED_USERS=true
+     */
+    const SHOULD_SEED = import.meta.env.DEV && import.meta.env.VITE_SEED_USERS === 'true';
+
+    if (users.length === 0 && SHOULD_SEED) {
       await Promise.all(
         INITIAL_USERS.map((u) =>
           setDoc(doc(db, COLLECTIONS.USERS, u.id), cleanData(u)),
@@ -71,7 +91,7 @@ export const StorageService = {
       return INITIAL_USERS;
     }
 
-    return users.map((u) => ({ ...u, security: u.security || { ...DEFAULT_SECURITY } }));
+    return users;
   },
 
   addUser: async (user: User): Promise<void> => {
@@ -311,3 +331,4 @@ export const StorageService = {
     }
   },
 };
+
