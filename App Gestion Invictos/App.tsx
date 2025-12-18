@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import Inventory from './components/Inventory';
@@ -10,7 +10,7 @@ import Login from './components/Login';
 import ProfileModal from './components/ProfileModal';
 import { StorageService } from './services/storageService';
 import { Product, Sale, User } from './types';
-import { Menu, Loader2, Database, AlertTriangle } from 'lucide-react';
+import { Menu, Loader2, Database, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -23,13 +23,40 @@ const App: React.FC = () => {
   const [sales, setSales] = useState<Sale[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  // ✅ Vite envs (no process.env)
+  // ✅ Vite envs (siempre import.meta.env)
   const env = import.meta.env as any;
-  const isConfigured = !!(
-    env.VITE_FIREBASE_API_KEY &&
-    env.VITE_FIREBASE_AUTH_DOMAIN &&
-    env.VITE_FIREBASE_PROJECT_ID
+
+  // ✅ Lista de env vars requeridas
+  const REQUIRED_ENV = useMemo(
+    () => [
+      'VITE_FIREBASE_API_KEY',
+      'VITE_FIREBASE_AUTH_DOMAIN',
+      'VITE_FIREBASE_PROJECT_ID',
+      'VITE_FIREBASE_APP_ID',
+    ] as const,
+    []
   );
+
+  // ✅ Calcula cuáles faltan (solo nombres, no valores)
+  const missing = useMemo(() => {
+    return REQUIRED_ENV.filter((k) => !env[k]);
+  }, [REQUIRED_ENV, env]);
+
+  const isConfigured = missing.length === 0;
+
+  // ✅ Log de diagnóstico (sin mostrar secretos)
+  useEffect(() => {
+    const mode = import.meta.env.MODE;
+
+    console.groupCollapsed('🧪 Firebase Config Check');
+    console.log('mode:', mode);
+    console.log('missing env:', missing);
+    console.log('hasProjectId:', !!env.VITE_FIREBASE_PROJECT_ID, 'projectId:', env.VITE_FIREBASE_PROJECT_ID);
+    console.log('hasAuthDomain:', !!env.VITE_FIREBASE_AUTH_DOMAIN, 'authDomain:', env.VITE_FIREBASE_AUTH_DOMAIN);
+    console.groupEnd();
+    // Nota: en StrictMode puede ejecutarse 2 veces en dev (normal).
+    // En Vercel (prod) lo verás 1 vez.
+  }, [missing.join('|')]);
 
   const refreshData = useCallback(async () => {
     setIsLoading(true);
@@ -41,7 +68,7 @@ const App: React.FC = () => {
       setProducts(prods);
       setSales(sls);
     } catch (error) {
-      console.error('Error loading data from cloud', error);
+      console.error('❌ Error loading data from cloud', error);
     } finally {
       setIsLoading(false);
     }
@@ -56,7 +83,7 @@ const App: React.FC = () => {
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
-    // Data refresh happens via useEffect
+    // refreshData corre por useEffect
   };
 
   const handleLogout = () => {
@@ -80,38 +107,55 @@ const App: React.FC = () => {
           <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mb-6 mx-auto">
             <Database size={32} />
           </div>
+
           <h1 className="text-2xl font-bold text-slate-800 text-center mb-2">
             Falta Configuración de Base de Datos
           </h1>
+
           <p className="text-slate-500 text-center mb-6">
-            La aplicación no puede conectarse a la nube porque faltan las credenciales de Firebase.
+            La aplicación no puede conectarse a la nube porque faltan credenciales de Firebase en el build.
           </p>
 
           <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 text-sm mb-6">
-            <p className="font-bold text-slate-700 mb-2">
-              Debes agregar estas Variables de Entorno en Vercel:
+            <p className="font-bold text-slate-700 mb-3">
+              Variables de Entorno en Vercel (Production / Preview):
             </p>
-            <ul className="space-y-2 font-mono text-slate-600">
-              <li className="flex items-center gap-2">
-                <AlertTriangle size={14} className="text-amber-500" /> VITE_FIREBASE_API_KEY
-              </li>
-              <li className="flex items-center gap-2">
-                <AlertTriangle size={14} className="text-amber-500" /> VITE_FIREBASE_AUTH_DOMAIN
-              </li>
-              <li className="flex items-center gap-2">
-                <AlertTriangle size={14} className="text-amber-500" /> VITE_FIREBASE_PROJECT_ID
-              </li>
+
+            <ul className="space-y-2 font-mono text-slate-700">
+              {REQUIRED_ENV.map((key) => {
+                const ok = !missing.includes(key);
+                return (
+                  <li key={key} className="flex items-center gap-2">
+                    {ok ? (
+                      <CheckCircle2 size={14} className="text-green-600" />
+                    ) : (
+                      <AlertTriangle size={14} className="text-amber-500" />
+                    )}
+                    <span className={ok ? 'text-slate-500 line-through' : ''}>{key}</span>
+                  </li>
+                );
+              })}
             </ul>
+
+            <div className="mt-4 text-xs text-slate-500">
+              <div className="font-semibold text-slate-700 mb-1">Faltan:</div>
+              <div className="text-red-600 font-mono break-words">
+                {missing.join(', ')}
+              </div>
+            </div>
           </div>
 
           <p className="text-xs text-center text-slate-400">
-            Obtén estos valores en: Firebase Console {'>'} Project Settings {'>'} Your Apps
+            Firebase Console → Project Settings → Your Apps → “Firebase SDK snippet (Config)”.
+            <br />
+            Luego en Vercel: Project → Settings → Environment Variables → redeploy.
           </p>
         </div>
       </div>
     );
   }
 
+  // --- LOGIN ---
   if (!currentUser) {
     return <Login onLogin={handleLogin} />;
   }
@@ -201,4 +245,5 @@ const App: React.FC = () => {
 };
 
 export default App;
+
 
