@@ -43,12 +43,13 @@ if (missing.length === 0) {
 
   // ✅ Firestore con setting útil (evita errores por undefined si algo se escapa)
   // (igual tu cleanData está perfecto)
-  try {
-    db = initializeFirestore(app, { ignoreUndefinedProperties: true });
-  } catch {
-    // Si ya estaba inicializado, usar getFirestore
-    db = getFirestore(app);
-  }
+   const DB_ID = "invictos-bd";
+try {
+  db = initializeFirestore(app, { ignoreUndefinedProperties: true }, DB_ID);
+} catch {
+  db = getFirestore(app, DB_ID);
+}
+
 
   // ✅ Persistencia offline (si falla, NO rompe)
   enableIndexedDbPersistence(db).catch((err: any) => {
