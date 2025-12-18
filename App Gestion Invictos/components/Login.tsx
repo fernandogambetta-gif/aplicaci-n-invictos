@@ -8,7 +8,7 @@ interface LoginProps {
 }
 
 // 🔥 Cambiá este string  para confirmar que estás viendo el deployment correcto
-const BUILD_TAG = 'LOGIN_BUILD_2025-12-17_01';
+const BUILD_TAG = 'LOGIN_BUILD_2025-12-17_02';
 
 const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [users, setUsers] = useState<User[]>([]);
