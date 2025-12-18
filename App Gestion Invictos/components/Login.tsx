@@ -141,23 +141,19 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
 
   // --- SVG Logo Component ---
   const InvictosLogo = () => (
-    <div className="flex flex-col items-center justify-center mb-6">
-      <svg viewBox="0 0 400 120" className="w-full max-w-[280px] h-auto" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" style={{ stopColor: '#4f46e5', stopOpacity: 1 }} />
-            <stop offset="100%" style={{ stopColor: '#818cf8', stopOpacity: 1 }} />
-          </linearGradient>
-        </defs>
-        <path d="M70,30 L90,30 L100,50 L90,80 L70,80" fill="none" stroke="url(#logoGradient)" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" className="opacity-20" />
-        <path d="M50,100 L80,90 L95,60 L120,50" fill="none" stroke="url(#logoGradient)" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx="95" cy="30" r="10" fill="url(#logoGradient)" />
-        <text x="140" y="85" fontFamily="'Inter', sans-serif" fontSize="60" fontWeight="900" fill="#1e293b" letterSpacing="2">INVICTOS</text>
-        <rect x="140" y="95" width="220" height="4" fill="#4f46e5" rx="2" />
-      </svg>
-      <p className="text-slate-500 text-sm font-medium tracking-widest uppercase mt-2">Sistema de Gestión</p>
-    </div>
-  );
+  <div className="flex flex-col items-center justify-center mb-6">
+    <img
+      src="/invictos-logo.png"
+      alt="INVICTOS"
+      className="w-full max-w-[280px] h-auto"
+      draggable={false}
+    />
+    <p className="text-slate-500 text-sm font-medium tracking-widest uppercase mt-2">
+      Sistema de Gestión
+    </p>
+  </div>
+);
+
 
   if (!selectedUser) {
     return (
