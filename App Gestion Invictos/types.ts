@@ -25,10 +25,40 @@ export interface CategoryItem {
   name: string;
 }
 
-export interface ProviderItem {
+export interface ProviderContact {
   id: string;
   name: string;
+  role?: string;
+  phone?: string;
+  whatsapp?: string;
+  email?: string;
+  isPrimary?: boolean;
+  notes?: string;
+}
+
+export interface ProviderItem {
+  id: string;
+
+  // Nombre comercial / empresa. Se conserva "name" para mantener
+  // compatibilidad con los productos ya cargados.
+  name: string;
+
+  // Datos generales de la empresa
+  taxId?: string;
+  address?: string;
+  city?: string;
+  province?: string;
+  website?: string;
+  notes?: string;
+
+  // Compatibilidad con registros antiguos
   contact?: string;
+
+  // Uno o varios contactos de la empresa
+  contacts?: ProviderContact[];
+
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface Product {
