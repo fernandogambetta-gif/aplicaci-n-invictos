@@ -21,8 +21,10 @@ import {
   Shirt,
   Palette,
   AlertTriangle,
+  Camera,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
+import BarcodeScannerModal from './BarcodeScannerModal';
 
 interface InventoryProps {
   products: Product[];
@@ -46,6 +48,9 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [isProviderModalOpen, setIsProviderModalOpen] = useState(false);
   const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
+  const [scanError, setScanError] = useState('');
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState<string>('ALL');
@@ -506,6 +511,31 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     return parts.length > 0 ? parts.join(' · ') : 'Sin variante';
   };
 
+  const handleBarcodeDetected = async (rawCode: string) => {
+    const code = rawCode.trim();
+    if (!code) return;
+
+    setScanError('');
+
+    let product = products.find(
+      (p) =>
+        (p.barcode || '').trim() === code ||
+        (p.code || '').trim().toLowerCase() === code.toLowerCase(),
+    );
+
+    if (!product) {
+      product = (await StorageService.getProductByBarcode(code)) || undefined;
+    }
+
+    if (!product) {
+      setScannedProduct(null);
+      setScanError(`No existe un producto registrado con el código ${code}.`);
+      return;
+    }
+
+    setScannedProduct(product);
+  };
+
   return (
     <div className="space-y-6">
       {/* CABECERA */}
@@ -518,6 +548,18 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         </div>
 
         <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setScanError('');
+              setIsScannerOpen(true);
+            }}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
+          >
+            <Camera size={20} />
+            Escanear
+          </button>
+
           <button
             type="button"
             onClick={() => StorageService.exportInventoryToCSV(products)}
@@ -566,6 +608,14 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           </button>
         </div>
       </div>
+
+      {scanError && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
+          <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+          <div className="flex-1 text-sm">{scanError}</div>
+          <button type="button" onClick={() => setScanError('')} className="text-red-500 hover:text-red-700">×</button>
+        </div>
+      )}
 
       {/* FILTROS */}
       <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col lg:flex-row gap-3">
@@ -823,6 +873,95 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
           </table>
         </div>
       </div>
+
+      <BarcodeScannerModal
+        open={isScannerOpen}
+        title="Escanear producto del inventario"
+        onClose={() => setIsScannerOpen(false)}
+        onDetected={handleBarcodeDetected}
+      />
+
+      {scannedProduct && (
+        <Portal>
+          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden">
+              <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-start gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-wide font-semibold text-indigo-600">Producto encontrado</div>
+                  <h3 className="text-xl font-bold text-slate-900 mt-1">{scannedProduct.name}</h3>
+                  <p className="text-sm text-slate-500 mt-1">{getVariantLabel(scannedProduct)}</p>
+                </div>
+                <button type="button" onClick={() => setScannedProduct(null)} className="text-slate-400 hover:text-slate-600 p-1">
+                  <X size={21} />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+                    <div className="text-[11px] uppercase font-semibold text-slate-400">Precio</div>
+                    <div className="text-2xl font-bold text-indigo-600 mt-1">
+                      ${Number(scannedProduct.price || 0).toLocaleString('es-AR')}
+                    </div>
+                  </div>
+                  <div className="bg-slate-50 border border-slate-100 rounded-xl p-3">
+                    <div className="text-[11px] uppercase font-semibold text-slate-400">Stock</div>
+                    <div className="text-2xl font-bold text-slate-900 mt-1">{Number(scannedProduct.stock || 0)} u.</div>
+                  </div>
+                </div>
+
+                <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 text-sm">
+                  <div className="flex justify-between gap-4 p-3">
+                    <span className="text-slate-500">SKU</span>
+                    <span className="font-mono text-slate-800 text-right">{scannedProduct.code}</span>
+                  </div>
+                  <div className="flex justify-between gap-4 p-3">
+                    <span className="text-slate-500">Código de barras</span>
+                    <span className="font-mono text-slate-800 text-right">{scannedProduct.barcode || 'Sin código'}</span>
+                  </div>
+                  <div className="flex justify-between gap-4 p-3">
+                    <span className="text-slate-500">Categoría</span>
+                    <span className="font-medium text-slate-800 text-right">{scannedProduct.category}</span>
+                  </div>
+                  <div className="flex justify-between gap-4 p-3">
+                    <span className="text-slate-500">Proveedor</span>
+                    <span className="font-medium text-slate-800 text-right">{scannedProduct.provider}</span>
+                  </div>
+                  <div className="flex justify-between gap-4 p-3">
+                    <span className="text-slate-500">Costo</span>
+                    <span className="font-medium text-slate-800 text-right">${Number(scannedProduct.cost || 0).toLocaleString('es-AR')}</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const product = scannedProduct;
+                      setScannedProduct(null);
+                      handleOpenRestock(product);
+                    }}
+                    className="py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2"
+                  >
+                    <PackagePlus size={18} /> Ingresar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const product = scannedProduct;
+                      setScannedProduct(null);
+                      handleEdit(product);
+                    }}
+                    className="py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Edit2 size={18} /> Editar
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Portal>
+      )}
 
       {/* RESTOCK MODAL */}
       {isRestockModalOpen && (
