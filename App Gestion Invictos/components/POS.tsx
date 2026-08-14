@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Product,
   SaleItem,
@@ -27,6 +27,11 @@ import {
   Landmark,
   WalletCards,
   X,
+  Search,
+  ChevronDown,
+  ChevronUp,
+  Barcode,
+  PackagePlus,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
@@ -39,21 +44,34 @@ interface POSProps {
 
 type MixedPaymentState = Record<PaymentMethod, string>;
 
+const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+
 const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const [cart, setCart] = useState<SaleItem[]>([]);
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
-  const [search, setSearch] = useState('');
-  const [paymentMethod, setPaymentMethod] = useState<SalePaymentMethod>('cash');
+
+  // Selector de productos en formato lista
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [productSearch, setProductSearch] = useState('');
+  const [letterFilter, setLetterFilter] = useState<string>('ALL');
+  const productSearchRef = useRef<HTMLInputElement | null>(null);
+
+  const [paymentMethod, setPaymentMethod] =
+    useState<SalePaymentMethod>('cash');
   const [mixedPayments, setMixedPayments] = useState<MixedPaymentState>({
     cash: '',
     card: '',
     transfer: '',
   });
+
   const [successMsg, setSuccessMsg] = useState('');
   const [checkoutError, setCheckoutError] = useState('');
-  const [config, setConfig] = useState<AppConfig>({ commissionPercentage: 5 });
+  const [config, setConfig] = useState<AppConfig>({
+    commissionPercentage: 5,
+  });
   const [isProcessing, setIsProcessing] = useState(false);
+
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [scanError, setScanError] = useState('');
 
@@ -62,6 +80,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       typeof value === 'string'
         ? Number(value.replace('%', '').replace(',', '.').trim())
         : Number(value);
+
     return Number.isFinite(n) ? n : fallback;
   };
 
@@ -96,12 +115,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       discountAmount = Math.min(normalizedValue, originalSubtotal);
     }
 
-    const subtotal = Math.max(0, originalSubtotal - discountAmount);
-
     return {
       originalSubtotal,
       discountAmount,
-      subtotal,
+      subtotal: Math.max(0, originalSubtotal - discountAmount),
     };
   };
 
@@ -110,10 +127,15 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     updates: Partial<SaleItem> = {},
   ): SaleItem => {
     const merged = { ...item, ...updates };
+
     const quantity = Math.max(1, toNumber(merged.quantity, 1));
     const priceAtSale = Math.max(0, toNumber(merged.priceAtSale, 0));
-    const discountType: ItemDiscountType = merged.discountType || 'percent';
-    const discountValue = Math.max(0, toNumber(merged.discountValue, 0));
+    const discountType: ItemDiscountType =
+      merged.discountType || 'percent';
+    const discountValue = Math.max(
+      0,
+      toNumber(merged.discountValue, 0),
+    );
 
     const totals = calculateLine(
       quantity,
@@ -158,26 +180,71 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     void load();
   }, []);
 
+  useEffect(() => {
+    if (!productPickerOpen) return;
+
+    const timer = window.setTimeout(() => {
+      productSearchRef.current?.focus();
+    }, 50);
+
+    return () => window.clearTimeout(timer);
+  }, [productPickerOpen]);
+
+  const showTemporarySuccess = (message: string) => {
+    setSuccessMsg(message);
+
+    window.setTimeout(() => {
+      setSuccessMsg('');
+    }, 1700);
+  };
+
+  const closeProductPicker = () => {
+    setProductPickerOpen(false);
+    setProductSearch('');
+    setLetterFilter('ALL');
+  };
+
   const addToCart = (product: Product) => {
     const stock = toNumber(product.stock, 0);
     const price = toNumber(product.price, 0);
 
-    if (stock <= 0 || price <= 0) return;
+    if (stock <= 0) {
+      setCheckoutError(`${product.name} no tiene stock disponible.`);
+      return;
+    }
+
+    if (price <= 0) {
+      setCheckoutError(`${product.name} no tiene un precio válido.`);
+      return;
+    }
 
     setCheckoutError('');
+    setScanError('');
+
+    let added = false;
 
     setCart((prev) => {
-      const existing = prev.find((item) => item.productId === product.id);
+      const existing = prev.find(
+        (item) => item.productId === product.id,
+      );
 
       if (existing) {
-        if (existing.quantity >= stock) return prev;
+        if (existing.quantity >= stock) {
+          return prev;
+        }
+
+        added = true;
 
         return prev.map((item) =>
           item.productId === product.id
-            ? normalizeCartItem(item, { quantity: item.quantity + 1 })
+            ? normalizeCartItem(item, {
+                quantity: item.quantity + 1,
+              })
             : item,
         );
       }
+
+      added = true;
 
       const newItem: SaleItem = {
         productId: product.id,
@@ -197,6 +264,19 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
       return [...prev, newItem];
     });
+
+    // React actualiza el estado de forma asincrónica. Este mensaje es
+    // deliberadamente simple: el control de stock definitivo también
+    // se valida al confirmar la venta en StorageService.
+    if (added || stock > 0) {
+      showTemporarySuccess(
+        `${product.name}${
+          product.color ? ` · ${product.color}` : ''
+        }${product.size ? ` · T. ${product.size}` : ''} agregado`,
+      );
+    }
+
+    closeProductPicker();
   };
 
   const handleBarcodeDetected = async (rawCode: string) => {
@@ -204,72 +284,100 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     if (!code) return;
 
     setScanError('');
+    setCheckoutError('');
 
     let product = products.find(
       (p) =>
         (p.barcode || '').trim() === code ||
-        (p.code || '').trim().toLowerCase() === code.toLowerCase(),
+        (p.code || '').trim().toLowerCase() ===
+          code.toLowerCase(),
     );
 
     if (!product) {
-      product = (await StorageService.getProductByBarcode(code)) || undefined;
+      product =
+        (await StorageService.getProductByBarcode(code)) ||
+        undefined;
     }
 
     if (!product) {
-      setScanError(`No existe un producto con el código ${code}.`);
-      return;
-    }
-
-    const stock = toNumber(product.stock, 0);
-    const price = toNumber(product.price, 0);
-
-    if (stock <= 0) {
-      setScanError(`${product.name} no tiene stock disponible.`);
-      return;
-    }
-
-    if (price <= 0) {
-      setScanError(`${product.name} no tiene un precio válido.`);
+      setScanError(
+        `No existe un producto registrado con el código ${code}.`,
+      );
       return;
     }
 
     addToCart(product);
-    setSuccessMsg(
-      `${product.name}${product.color ? ` · ${product.color}` : ''}${
-        product.size ? ` · ${product.size}` : ''
-      } agregado a la venta`,
+  };
+
+  const handleProductSearchEnter = () => {
+    const value = productSearch.trim();
+
+    if (!value) return;
+
+    const exact = products.find(
+      (product) =>
+        (product.barcode || '').trim() === value ||
+        (product.code || '').trim().toLowerCase() ===
+          value.toLowerCase(),
     );
-    setTimeout(() => setSuccessMsg(''), 1600);
+
+    if (exact) {
+      addToCart(exact);
+    }
   };
 
   const removeFromCart = (productId: string) => {
     setCheckoutError('');
-    setCart((prev) => prev.filter((item) => item.productId !== productId));
+    setCart((prev) =>
+      prev.filter((item) => item.productId !== productId),
+    );
   };
 
   const clearCart = () => {
     if (!cart.length) return;
-    if (!confirm('¿Vaciar todos los productos de la venta?')) return;
+
+    if (!confirm('¿Vaciar todos los productos de la venta?')) {
+      return;
+    }
 
     setCart([]);
-    setMixedPayments({ cash: '', card: '', transfer: '' });
+    setMixedPayments({
+      cash: '',
+      card: '',
+      transfer: '',
+    });
     setCheckoutError('');
   };
 
-  const updateQuantity = (productId: string, delta: number) => {
+  const updateQuantity = (
+    productId: string,
+    delta: number,
+  ) => {
     setCheckoutError('');
 
     setCart((prev) =>
       prev.map((item) => {
         if (item.productId !== productId) return item;
 
-        const product = products.find((p) => p.id === productId);
-        const maxStock = product ? toNumber(product.stock, 0) : 0;
+        const product = products.find(
+          (p) => p.id === productId,
+        );
+        const maxStock = product
+          ? toNumber(product.stock, 0)
+          : 0;
+
         const newQuantity = item.quantity + delta;
 
-        if (newQuantity < 1 || newQuantity > maxStock) return item;
+        if (
+          newQuantity < 1 ||
+          newQuantity > maxStock
+        ) {
+          return item;
+        }
 
-        return normalizeCartItem(item, { quantity: newQuantity });
+        return normalizeCartItem(item, {
+          quantity: newQuantity,
+        });
       }),
     );
   };
@@ -279,23 +387,36 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     discountType: ItemDiscountType,
   ) => {
     setCheckoutError('');
+
     setCart((prev) =>
       prev.map((item) =>
         item.productId === productId
-          ? normalizeCartItem(item, { discountType, discountValue: 0 })
+          ? normalizeCartItem(item, {
+              discountType,
+              discountValue: 0,
+            })
           : item,
       ),
     );
   };
 
-  const updateDiscountValue = (productId: string, value: string) => {
-    const discountValue = Math.max(0, toNumber(value, 0));
+  const updateDiscountValue = (
+    productId: string,
+    value: string,
+  ) => {
+    const discountValue = Math.max(
+      0,
+      toNumber(value, 0),
+    );
+
     setCheckoutError('');
 
     setCart((prev) =>
       prev.map((item) =>
         item.productId === productId
-          ? normalizeCartItem(item, { discountValue })
+          ? normalizeCartItem(item, {
+              discountValue,
+            })
           : item,
       ),
     );
@@ -306,32 +427,51 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       acc +
       toNumber(
         item.originalSubtotal,
-        toNumber(item.quantity, 0) * toNumber(item.priceAtSale, 0),
+        toNumber(item.quantity, 0) *
+          toNumber(item.priceAtSale, 0),
       ),
     0,
   );
 
   const totalDiscount = cart.reduce(
-    (acc, item) => acc + toNumber(item.discountAmount, 0),
+    (acc, item) =>
+      acc + toNumber(item.discountAmount, 0),
     0,
   );
 
   const finalTotal = cart.reduce(
-    (acc, item) => acc + toNumber(item.subtotal, 0),
+    (acc, item) =>
+      acc + toNumber(item.subtotal, 0),
     0,
   );
 
   const totalUnits = cart.reduce(
-    (acc, item) => acc + toNumber(item.quantity, 0),
+    (acc, item) =>
+      acc + toNumber(item.quantity, 0),
     0,
   );
 
   const parsedMixedPayments: PaymentAllocation[] = [
-    { method: 'cash', amount: Math.max(0, toNumber(mixedPayments.cash, 0)) },
-    { method: 'card', amount: Math.max(0, toNumber(mixedPayments.card, 0)) },
+    {
+      method: 'cash',
+      amount: Math.max(
+        0,
+        toNumber(mixedPayments.cash, 0),
+      ),
+    },
+    {
+      method: 'card',
+      amount: Math.max(
+        0,
+        toNumber(mixedPayments.card, 0),
+      ),
+    },
     {
       method: 'transfer',
-      amount: Math.max(0, toNumber(mixedPayments.transfer, 0)),
+      amount: Math.max(
+        0,
+        toNumber(mixedPayments.transfer, 0),
+      ),
     },
   ].filter((payment) => payment.amount > 0);
 
@@ -340,52 +480,94 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     0,
   );
 
-  const paymentDifference = finalTotal - mixedAssigned;
-  const mixedPaymentValid = Math.abs(paymentDifference) < 0.01;
+  const paymentDifference =
+    finalTotal - mixedAssigned;
 
-  const setPaymentAndReset = (method: SalePaymentMethod) => {
+  const mixedPaymentValid =
+    Math.abs(paymentDifference) < 0.01;
+
+  const setPaymentAndReset = (
+    method: SalePaymentMethod,
+  ) => {
     setPaymentMethod(method);
     setCheckoutError('');
 
     if (method !== 'mixed') {
-      setMixedPayments({ cash: '', card: '', transfer: '' });
+      setMixedPayments({
+        cash: '',
+        card: '',
+        transfer: '',
+      });
     }
   };
 
-  const completeRemainingWith = (method: PaymentMethod) => {
-    const others = (['cash', 'card', 'transfer'] as PaymentMethod[])
+  const completeRemainingWith = (
+    method: PaymentMethod,
+  ) => {
+    const others = (
+      ['cash', 'card', 'transfer'] as PaymentMethod[]
+    )
       .filter((m) => m !== method)
-      .reduce((acc, m) => acc + Math.max(0, toNumber(mixedPayments[m], 0)), 0);
+      .reduce(
+        (acc, m) =>
+          acc +
+          Math.max(
+            0,
+            toNumber(mixedPayments[m], 0),
+          ),
+        0,
+      );
 
-    const remaining = Math.max(0, finalTotal - others);
+    const remaining = Math.max(
+      0,
+      finalTotal - others,
+    );
 
     setMixedPayments((prev) => ({
       ...prev,
-      [method]: remaining > 0 ? remaining.toFixed(2) : '',
+      [method]:
+        remaining > 0
+          ? remaining.toFixed(2)
+          : '',
     }));
   };
 
-  const getPaymentsForSale = (): PaymentAllocation[] => {
-    if (paymentMethod === 'mixed') return parsedMixedPayments;
+  const getPaymentsForSale =
+    (): PaymentAllocation[] => {
+      if (paymentMethod === 'mixed') {
+        return parsedMixedPayments;
+      }
 
-    return [
-      {
-        method: paymentMethod,
-        amount: finalTotal,
-      },
-    ];
-  };
+      return [
+        {
+          method: paymentMethod,
+          amount: finalTotal,
+        },
+      ];
+    };
 
   const handleCheckout = async () => {
-    if (cart.length === 0 || finalTotal <= 0) return;
+    if (
+      cart.length === 0 ||
+      finalTotal <= 0
+    ) {
+      return;
+    }
 
     setCheckoutError('');
 
-    if (paymentMethod === 'mixed' && !mixedPaymentValid) {
+    if (
+      paymentMethod === 'mixed' &&
+      !mixedPaymentValid
+    ) {
       setCheckoutError(
         paymentDifference > 0
-          ? `Faltan asignar $${formatMoney(paymentDifference)} en la forma de pago.`
-          : `Los pagos superan el total en $${formatMoney(Math.abs(paymentDifference))}.`,
+          ? `Faltan asignar $${formatMoney(
+              paymentDifference,
+            )} en la forma de pago.`
+          : `Los pagos superan el total en $${formatMoney(
+              Math.abs(paymentDifference),
+            )}.`,
       );
       return;
     }
@@ -393,15 +575,24 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     setIsProcessing(true);
 
     try {
-      const configRate = toRate(config?.commissionPercentage, 5);
-      const userRate = toRate(currentUser?.commissionPercentage, configRate);
+      const configRate = toRate(
+        config?.commissionPercentage,
+        5,
+      );
 
-      // La comisión se calcula sobre el importe neto de cada producto,
-      // es decir, después de su descuento individual.
-      const itemsWithCommission = cart.map((item) => ({
-        ...item,
-        commissionAmount: toNumber(item.subtotal, 0) * (userRate / 100),
-      }));
+      const userRate = toRate(
+        currentUser?.commissionPercentage,
+        configRate,
+      );
+
+      const itemsWithCommission = cart.map(
+        (item) => ({
+          ...item,
+          commissionAmount:
+            toNumber(item.subtotal, 0) *
+            (userRate / 100),
+        }),
+      );
 
       const sale: Sale = {
         id: Date.now().toString(),
@@ -420,15 +611,31 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
       setCart([]);
       setPaymentMethod('cash');
-      setMixedPayments({ cash: '', card: '', transfer: '' });
+      setMixedPayments({
+        cash: '',
+        card: '',
+        transfer: '',
+      });
+
       await onSaleComplete();
 
-      setSuccessMsg('Venta registrada correctamente.');
-      setTimeout(() => setSuccessMsg(''), 3000);
+      setSuccessMsg(
+        'Venta registrada correctamente.',
+      );
+
+      window.setTimeout(
+        () => setSuccessMsg(''),
+        3000,
+      );
     } catch (error: any) {
-      console.error('Error procesando venta:', error);
+      console.error(
+        'Error procesando venta:',
+        error,
+      );
+
       setCheckoutError(
-        error?.message || 'No se pudo registrar la venta. Intentá nuevamente.',
+        error?.message ||
+          'No se pudo registrar la venta. Intentá nuevamente.',
       );
     } finally {
       setIsProcessing(false);
@@ -436,29 +643,63 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   };
 
   const filteredProducts = useMemo(() => {
-    const searchLower = search.toLowerCase().trim();
+    const term = productSearch
+      .trim()
+      .toLowerCase();
 
-    return products.filter((p) => {
-      const matchesCat =
-        selectedCategory === 'ALL' || p.category === selectedCategory;
+    return products
+      .filter((product) => {
+        const matchesCategory =
+          selectedCategory === 'ALL' ||
+          product.category === selectedCategory;
 
-      const searchable = [
-        p.name,
-        p.code,
-        p.barcode,
-        p.color,
-        p.size,
-        p.category,
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
+        const initial = (product.name || '')
+          .trim()
+          .charAt(0)
+          .toUpperCase();
 
-      return matchesCat && (!searchLower || searchable.includes(searchLower));
-    });
-  }, [products, selectedCategory, search]);
+        const matchesLetter =
+          letterFilter === 'ALL' ||
+          initial === letterFilter;
 
-  const paymentButtonClass = (active: boolean) =>
+        const searchable = [
+          product.name,
+          product.code,
+          product.barcode,
+          product.color,
+          product.size,
+          product.category,
+          product.provider,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+
+        const matchesSearch =
+          !term || searchable.includes(term);
+
+        return (
+          matchesCategory &&
+          matchesLetter &&
+          matchesSearch
+        );
+      })
+      .sort((a, b) =>
+        (a.name || '').localeCompare(
+          b.name || '',
+          'es',
+        ),
+      );
+  }, [
+    products,
+    productSearch,
+    letterFilter,
+    selectedCategory,
+  ]);
+
+  const paymentButtonClass = (
+    active: boolean,
+  ) =>
     `flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-lg border transition-colors ${
       active
         ? 'bg-indigo-600 text-white border-indigo-600'
@@ -466,424 +707,809 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     }`;
 
   return (
-    <div className="flex flex-col xl:flex-row gap-5 min-h-[calc(100vh-8rem)]">
-      {/* PRODUCTOS */}
-      <div className="flex-1 min-w-0 flex flex-col gap-4">
-        <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col md:flex-row gap-3">
-          <div className="flex flex-1 gap-2">
-            <input
-              type="text"
-              placeholder="Buscar por nombre, SKU, código, talle o color..."
-              className="flex-1 min-w-0 px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+    <div className="space-y-5">
+      {/* CABECERA */}
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+            <ShoppingCart size={25} />
+            Nueva venta
+          </h2>
 
+          <p className="text-sm text-slate-500 mt-1">
+            La venta se arma por filas. Seleccioná, buscá o escaneá cada producto.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <div className="bg-white border border-slate-200 rounded-xl px-4 py-2">
+            <div className="text-[10px] uppercase font-semibold text-slate-400">
+              Productos
+            </div>
+            <div className="font-bold text-slate-800">
+              {cart.length}
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-xl px-4 py-2">
+            <div className="text-[10px] uppercase font-semibold text-slate-400">
+              Unidades
+            </div>
+            <div className="font-bold text-slate-800">
+              {totalUnits}
+            </div>
+          </div>
+
+          <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-2 min-w-[150px]">
+            <div className="text-[10px] uppercase font-semibold text-indigo-500">
+              Total actual
+            </div>
+            <div className="text-xl font-bold text-indigo-700">
+              ${formatMoney(finalTotal)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {scanError && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
+          <AlertTriangle
+            size={18}
+            className="mt-0.5 shrink-0"
+          />
+          <div className="flex-1 text-sm">
+            {scanError}
+          </div>
+          <button
+            type="button"
+            onClick={() => setScanError('')}
+            className="text-red-500 hover:text-red-700"
+          >
+            <X size={17} />
+          </button>
+        </div>
+      )}
+
+      {/* TABLA PRINCIPAL DE LA VENTA */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <div className="font-bold text-slate-800">
+              Detalle de la venta
+            </div>
+            <div className="text-xs text-slate-500">
+              Vendedor: {currentUser.name}
+            </div>
+          </div>
+
+          <div className="flex gap-2">
             <button
               type="button"
               onClick={() => {
                 setScanError('');
                 setIsScannerOpen(true);
               }}
-              className="shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-lg flex items-center gap-2 font-semibold shadow-sm"
-              title="Escanear con la cámara"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded-lg flex items-center gap-2 text-sm font-semibold"
             >
-              <Camera size={20} />
-              <span className="hidden md:inline">Escanear</span>
+              <Camera size={18} />
+              Escanear
             </button>
-          </div>
 
-          <select
-            className="px-4 py-2.5 border border-slate-300 rounded-lg focus:outline-none bg-white"
-            value={selectedCategory}
-            onChange={(e) => setSelectedCategory(e.target.value)}
-          >
-            <option value="ALL">Todas las Categorías</option>
-            {categories.map((cat) => (
-              <option key={cat.id} value={cat.name}>
-                {cat.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {scanError && (
-          <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
-            <AlertTriangle size={18} className="mt-0.5 shrink-0" />
-            <div className="flex-1 text-sm">{scanError}</div>
-            <button
-              type="button"
-              onClick={() => setScanError('')}
-              className="text-red-500 hover:text-red-700"
-            >
-              <X size={17} />
-            </button>
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 md:grid-cols-3 2xl:grid-cols-4 gap-3 content-start">
-          {filteredProducts.map((product) => {
-            const stock = toNumber(product.stock, 0);
-            const price = toNumber(product.price, 0);
-            const inCart = cart.find((item) => item.productId === product.id);
-
-            return (
+            {cart.length > 0 && (
               <button
-                key={product.id}
                 type="button"
-                onClick={() => addToCart(product)}
-                disabled={stock <= 0}
-                className={`flex flex-col items-start p-4 rounded-xl border transition-all text-left relative min-h-[150px] ${
-                  stock > 0
-                    ? 'bg-white border-slate-200 hover:border-indigo-500 hover:shadow-md cursor-pointer'
-                    : 'bg-slate-100 border-slate-200 opacity-60 cursor-not-allowed'
-                }`}
+                onClick={clearCart}
+                className="text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg text-sm font-semibold"
               >
-                {inCart && (
-                  <span className="absolute top-2 right-2 min-w-6 h-6 px-1.5 rounded-full bg-indigo-600 text-white text-xs font-bold flex items-center justify-center">
-                    {inCart.quantity}
-                  </span>
-                )}
-
-                <div className="text-[10px] font-mono text-slate-400 pr-7">
-                  {product.code}
-                </div>
-
-                <h3 className="font-semibold text-slate-800 leading-tight mt-1 line-clamp-2">
-                  {product.name}
-                </h3>
-
-                {(product.color || product.size) && (
-                  <div className="text-xs text-slate-500 mt-1">
-                    {[product.color, product.size ? `T. ${product.size}` : '']
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </div>
-                )}
-
-                <div className="mt-auto pt-3 w-full flex justify-between items-end gap-2">
-                  <span className="text-lg font-bold text-indigo-600">
-                    ${formatMoney(price)}
-                  </span>
-                  <span
-                    className={`text-[11px] px-2 py-1 rounded ${
-                      stock < 3
-                        ? 'bg-red-100 text-red-600'
-                        : 'bg-slate-100 text-slate-600'
-                    }`}
-                  >
-                    Stock {stock}
-                  </span>
-                </div>
+                Vaciar venta
               </button>
-            );
-          })}
+            )}
+          </div>
         </div>
 
-        {filteredProducts.length === 0 && (
-          <div className="bg-white border border-slate-200 rounded-xl py-12 text-center text-slate-400">
-            No se encontraron productos.
-          </div>
-        )}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left min-w-[980px]">
+            <thead className="bg-white border-b border-slate-200">
+              <tr>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">
+                  Producto
+                </th>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">
+                  Variante
+                </th>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase text-right">
+                  P. unitario
+                </th>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase text-center">
+                  Cantidad
+                </th>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase">
+                  Descuento
+                </th>
+                <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase text-right">
+                  Total
+                </th>
+                <th className="w-12" />
+              </tr>
+            </thead>
+
+            <tbody className="divide-y divide-slate-100">
+              {cart.map((item) => {
+                const discountAmount =
+                  toNumber(
+                    item.discountAmount,
+                    0,
+                  );
+
+                return (
+                  <tr
+                    key={item.productId}
+                    className="hover:bg-slate-50"
+                  >
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-slate-900">
+                        {item.productName}
+                      </div>
+
+                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-400">
+                        {item.productCode && (
+                          <span className="font-mono">
+                            {item.productCode}
+                          </span>
+                        )}
+
+                        {item.barcode && (
+                          <span className="font-mono flex items-center gap-1">
+                            <Barcode size={11} />
+                            {item.barcode}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="px-4 py-3 text-sm text-slate-600">
+                      {[item.color, item.size ? `T. ${item.size}` : '']
+                        .filter(Boolean)
+                        .join(' · ') || '—'}
+                    </td>
+
+                    <td className="px-4 py-3 text-right font-medium text-slate-700">
+                      ${formatMoney(item.priceAtSale)}
+                    </td>
+
+                    <td className="px-4 py-3">
+                      <div className="flex items-center justify-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateQuantity(
+                              item.productId,
+                              -1,
+                            )
+                          }
+                          className="w-8 h-8 flex items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100"
+                        >
+                          <Minus size={14} />
+                        </button>
+
+                        <div className="w-10 text-center font-bold text-slate-800">
+                          {item.quantity}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateQuantity(
+                              item.productId,
+                              1,
+                            )
+                          }
+                          className="w-8 h-8 flex items-center justify-center rounded-lg border border-slate-200 hover:bg-slate-100"
+                        >
+                          <Plus size={14} />
+                        </button>
+                      </div>
+                    </td>
+
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2 min-w-[190px]">
+                        <select
+                          value={
+                            item.discountType ||
+                            'percent'
+                          }
+                          onChange={(e) =>
+                            updateDiscountType(
+                              item.productId,
+                              e.target
+                                .value as ItemDiscountType,
+                            )
+                          }
+                          className="border border-slate-300 rounded-lg px-2 py-2 bg-white text-sm"
+                        >
+                          <option value="percent">
+                            %
+                          </option>
+                          <option value="amount">
+                            $
+                          </option>
+                        </select>
+
+                        <input
+                          type="number"
+                          min="0"
+                          max={
+                            item.discountType ===
+                            'percent'
+                              ? 100
+                              : undefined
+                          }
+                          value={
+                            item.discountValue || ''
+                          }
+                          onChange={(e) =>
+                            updateDiscountValue(
+                              item.productId,
+                              e.target.value,
+                            )
+                          }
+                          placeholder="0"
+                          className="w-24 border border-slate-300 rounded-lg px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                        />
+
+                        {discountAmount > 0 && (
+                          <span className="text-xs font-semibold text-emerald-600 whitespace-nowrap">
+                            -$
+                            {formatMoney(
+                              discountAmount,
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="px-4 py-3 text-right">
+                      <div className="font-bold text-indigo-700 text-base">
+                        $
+                        {formatMoney(
+                          item.subtotal,
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="px-2 py-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          removeFromCart(
+                            item.productId,
+                          )
+                        }
+                        title="Quitar producto"
+                        className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg"
+                      >
+                        <Trash size={17} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+
+              {/* FILA PARA AGREGAR EL SIGUIENTE PRODUCTO */}
+              <tr className="bg-slate-50/70">
+                <td colSpan={7} className="p-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setProductPickerOpen(
+                        (prev) => !prev,
+                      )
+                    }
+                    className="w-full px-4 py-4 flex items-center justify-between gap-3 text-left hover:bg-indigo-50 transition-colors"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-lg bg-indigo-100 text-indigo-600 flex items-center justify-center">
+                        <PackagePlus size={19} />
+                      </div>
+
+                      <div>
+                        <div className="font-semibold text-indigo-700">
+                          + Agregar otro producto
+                        </div>
+                        <div className="text-xs text-slate-500 mt-0.5">
+                          Hacé clic para buscar por nombre, primera letra, SKU o código de barras.
+                        </div>
+                      </div>
+                    </div>
+
+                    {productPickerOpen ? (
+                      <ChevronUp
+                        size={19}
+                        className="text-slate-400"
+                      />
+                    ) : (
+                      <ChevronDown
+                        size={19}
+                        className="text-slate-400"
+                      />
+                    )}
+                  </button>
+                </td>
+              </tr>
+
+              {productPickerOpen && (
+                <tr>
+                  <td
+                    colSpan={7}
+                    className="p-0 border-t border-indigo-100"
+                  >
+                    <div className="p-4 bg-indigo-50/40 space-y-3">
+                      {/* Búsqueda + categoría + cámara */}
+                      <div className="flex flex-col lg:flex-row gap-2">
+                        <div className="relative flex-1">
+                          <Search
+                            size={18}
+                            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                          />
+
+                          <input
+                            ref={productSearchRef}
+                            type="text"
+                            value={productSearch}
+                            onChange={(e) =>
+                              setProductSearch(
+                                e.target.value,
+                              )
+                            }
+                            onKeyDown={(e) => {
+                              if (
+                                e.key === 'Enter'
+                              ) {
+                                e.preventDefault();
+                                handleProductSearchEnter();
+                              }
+                            }}
+                            placeholder="Escribí nombre o escaneá/ingresá SKU o código y presioná Enter..."
+                            className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          />
+                        </div>
+
+                        <select
+                          value={selectedCategory}
+                          onChange={(e) =>
+                            setSelectedCategory(
+                              e.target.value,
+                            )
+                          }
+                          className="px-3 py-2.5 border border-slate-300 rounded-lg bg-white"
+                        >
+                          <option value="ALL">
+                            Todas las categorías
+                          </option>
+                          {categories.map((cat) => (
+                            <option
+                              key={cat.id}
+                              value={cat.name}
+                            >
+                              {cat.name}
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScanError('');
+                            setIsScannerOpen(true);
+                          }}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-lg flex items-center justify-center gap-2 font-semibold"
+                        >
+                          <Camera size={18} />
+                          Cámara
+                        </button>
+                      </div>
+
+                      {/* Filtro alfabético */}
+                      <div className="flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setLetterFilter(
+                              'ALL',
+                            )
+                          }
+                          className={`px-2.5 py-1.5 rounded-md text-xs font-semibold border ${
+                            letterFilter === 'ALL'
+                              ? 'bg-indigo-600 text-white border-indigo-600'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                          }`}
+                        >
+                          Todos
+                        </button>
+
+                        {ALPHABET.map((letter) => (
+                          <button
+                            key={letter}
+                            type="button"
+                            onClick={() =>
+                              setLetterFilter(
+                                letter,
+                              )
+                            }
+                            className={`w-8 h-8 rounded-md text-xs font-semibold border ${
+                              letterFilter ===
+                              letter
+                                ? 'bg-indigo-600 text-white border-indigo-600'
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                            }`}
+                          >
+                            {letter}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* Lista de productos en filas */}
+                      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+                        <div className="max-h-[330px] overflow-y-auto">
+                          <table className="w-full text-left min-w-[760px]">
+                            <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
+                              <tr>
+                                <th className="px-3 py-2 text-[11px] uppercase text-slate-500 font-semibold">
+                                  Producto
+                                </th>
+                                <th className="px-3 py-2 text-[11px] uppercase text-slate-500 font-semibold">
+                                  Variante
+                                </th>
+                                <th className="px-3 py-2 text-[11px] uppercase text-slate-500 font-semibold">
+                                  Código
+                                </th>
+                                <th className="px-3 py-2 text-[11px] uppercase text-slate-500 font-semibold text-right">
+                                  Precio
+                                </th>
+                                <th className="px-3 py-2 text-[11px] uppercase text-slate-500 font-semibold text-center">
+                                  Stock
+                                </th>
+                              </tr>
+                            </thead>
+
+                            <tbody className="divide-y divide-slate-100">
+                              {filteredProducts.map(
+                                (product) => {
+                                  const stock =
+                                    toNumber(
+                                      product.stock,
+                                      0,
+                                    );
+                                  const price =
+                                    toNumber(
+                                      product.price,
+                                      0,
+                                    );
+                                  const disabled =
+                                    stock <= 0 ||
+                                    price <= 0;
+
+                                  return (
+                                    <tr
+                                      key={
+                                        product.id
+                                      }
+                                      onClick={() => {
+                                        if (
+                                          !disabled
+                                        ) {
+                                          addToCart(
+                                            product,
+                                          );
+                                        }
+                                      }}
+                                      className={`${
+                                        disabled
+                                          ? 'bg-slate-50 opacity-55 cursor-not-allowed'
+                                          : 'cursor-pointer hover:bg-indigo-50'
+                                      }`}
+                                    >
+                                      <td className="px-3 py-2.5">
+                                        <div className="font-medium text-slate-800">
+                                          {
+                                            product.name
+                                          }
+                                        </div>
+                                        <div className="text-[11px] text-slate-400">
+                                          {
+                                            product.category
+                                          }
+                                        </div>
+                                      </td>
+
+                                      <td className="px-3 py-2.5 text-sm text-slate-600">
+                                        {[
+                                          product.color,
+                                          product.size
+                                            ? `T. ${product.size}`
+                                            : '',
+                                        ]
+                                          .filter(
+                                            Boolean,
+                                          )
+                                          .join(
+                                            ' · ',
+                                          ) ||
+                                          '—'}
+                                      </td>
+
+                                      <td className="px-3 py-2.5">
+                                        <div className="font-mono text-xs text-slate-600">
+                                          {
+                                            product.code
+                                          }
+                                        </div>
+                                        {product.barcode && (
+                                          <div className="font-mono text-[10px] text-slate-400 mt-0.5">
+                                            {
+                                              product.barcode
+                                            }
+                                          </div>
+                                        )}
+                                      </td>
+
+                                      <td className="px-3 py-2.5 text-right font-semibold text-slate-800">
+                                        $
+                                        {formatMoney(
+                                          price,
+                                        )}
+                                      </td>
+
+                                      <td className="px-3 py-2.5 text-center">
+                                        <span
+                                          className={`inline-flex px-2 py-1 rounded text-xs font-semibold ${
+                                            stock <= 0
+                                              ? 'bg-red-100 text-red-700'
+                                              : stock <=
+                                                  Number(
+                                                    product.minStock ??
+                                                      3,
+                                                  )
+                                                ? 'bg-amber-100 text-amber-700'
+                                                : 'bg-emerald-100 text-emerald-700'
+                                          }`}
+                                        >
+                                          {stock}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  );
+                                },
+                              )}
+
+                              {filteredProducts.length ===
+                                0 && (
+                                <tr>
+                                  <td
+                                    colSpan={5}
+                                    className="px-4 py-8 text-center text-slate-400"
+                                  >
+                                    No hay productos con ese filtro.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-3 text-xs text-slate-500">
+                        <span>
+                          {filteredProducts.length}{' '}
+                          producto(s) mostrado(s)
+                        </span>
+
+                        <button
+                          type="button"
+                          onClick={closeProductPicker}
+                          className="text-slate-600 hover:text-slate-900 font-semibold"
+                        >
+                          Cerrar selector
+                        </button>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* VENTA / CARRITO */}
-      <div className="w-full xl:w-[520px] bg-white rounded-xl shadow-lg border border-slate-200 flex flex-col xl:sticky xl:top-4 xl:max-h-[calc(100vh-7rem)]">
-        <div className="p-4 border-b border-slate-100 bg-slate-50 rounded-t-xl flex items-start justify-between gap-3">
+      {/* RESUMEN + PAGO */}
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.15fr] gap-5">
+        {/* Totales */}
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
+          <h3 className="font-bold text-slate-800 mb-4">
+            Resumen
+          </h3>
+
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm text-slate-500">
+              <span>
+                Subtotal de productos
+              </span>
+              <span>
+                ${formatMoney(grossSubtotal)}
+              </span>
+            </div>
+
+            <div className="flex justify-between text-sm text-emerald-600 font-medium">
+              <span>Descuentos</span>
+              <span>
+                - ${formatMoney(totalDiscount)}
+              </span>
+            </div>
+
+            <div className="flex justify-between items-end pt-3 mt-3 border-t border-slate-200">
+              <div>
+                <div className="text-xs uppercase font-bold text-slate-500">
+                  Total venta
+                </div>
+                <div className="text-xs text-slate-400 mt-1">
+                  {cart.length} producto(s) ·{' '}
+                  {totalUnits} unidad(es)
+                </div>
+              </div>
+
+              <div className="text-3xl font-bold text-indigo-700">
+                ${formatMoney(finalTotal)}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Forma de pago */}
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
           <div>
-            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-              <ShoppingCart size={23} /> Venta
-            </h2>
+            <h3 className="font-bold text-slate-800">
+              Forma de pago
+            </h3>
             <p className="text-xs text-slate-500 mt-1">
-              {cart.length} productos diferentes · {totalUnits} unidades · Vendedor: {currentUser.name}
+              Puede ser simple o mixta.
             </p>
           </div>
 
-          {cart.length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <button
               type="button"
-              onClick={clearCart}
-              className="text-xs text-red-500 hover:bg-red-50 rounded-lg px-2.5 py-2 font-semibold"
+              onClick={() =>
+                setPaymentAndReset('cash')
+              }
+              className={paymentButtonClass(
+                paymentMethod === 'cash',
+              )}
             >
-              Vaciar
+              <Banknote size={15} />
+              Efectivo
             </button>
-          )}
-        </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-3 min-h-[240px]">
-          {cart.length === 0 ? (
-            <div className="h-full min-h-[220px] flex flex-col items-center justify-center text-slate-400 space-y-2">
-              <ShoppingCart size={48} className="opacity-20" />
-              <p className="font-medium">La venta está vacía</p>
-              <p className="text-xs text-center max-w-xs">
-                Tocá distintos productos o escaneá sus códigos. Cada producto se irá agregando a esta misma venta.
-              </p>
-            </div>
-          ) : (
-            cart.map((item) => {
-              const originalSubtotal = toNumber(
-                item.originalSubtotal,
-                item.quantity * item.priceAtSale,
-              );
-              const discountAmount = toNumber(item.discountAmount, 0);
+            <button
+              type="button"
+              onClick={() =>
+                setPaymentAndReset('card')
+              }
+              className={paymentButtonClass(
+                paymentMethod === 'card',
+              )}
+            >
+              <CreditCard size={15} />
+              Tarjeta
+            </button>
 
-              return (
-                <div
-                  key={item.productId}
-                  className="border border-slate-200 rounded-xl p-3 bg-white shadow-sm"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-slate-800 leading-tight">
-                        {item.productName}
-                      </p>
+            <button
+              type="button"
+              onClick={() =>
+                setPaymentAndReset(
+                  'transfer',
+                )
+              }
+              className={paymentButtonClass(
+                paymentMethod ===
+                  'transfer',
+              )}
+            >
+              <Landmark size={15} />
+              Transfer.
+            </button>
 
-                      {(item.color || item.size) && (
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          {[item.color, item.size ? `Talle ${item.size}` : '']
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </p>
-                      )}
-
-                      <p className="text-xs text-slate-400 mt-1">
-                        ${formatMoney(item.priceAtSale)} c/u
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => removeFromCart(item.productId)}
-                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg"
-                      title="Quitar producto"
-                    >
-                      <Trash size={17} />
-                    </button>
-                  </div>
-
-                  <div className="mt-3 grid grid-cols-[auto_1fr] gap-3 items-center">
-                    <div className="flex items-center gap-1.5 bg-slate-100 rounded-lg p-1">
-                      <button
-                        type="button"
-                        onClick={() => updateQuantity(item.productId, -1)}
-                        className="p-1.5 hover:bg-white rounded-md"
-                      >
-                        <Minus size={15} />
-                      </button>
-
-                      <span className="w-8 text-center font-bold text-sm">
-                        {item.quantity}
-                      </span>
-
-                      <button
-                        type="button"
-                        onClick={() => updateQuantity(item.productId, 1)}
-                        className="p-1.5 hover:bg-white rounded-md"
-                      >
-                        <Plus size={15} />
-                      </button>
-                    </div>
-
-                    <div className="text-right">
-                      <div className="text-[10px] uppercase font-semibold text-slate-400">
-                        Bruto
-                      </div>
-                      <div className="font-semibold text-slate-700">
-                        ${formatMoney(originalSubtotal)}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* DESCUENTO POR PRODUCTO */}
-                  <div className="mt-3 pt-3 border-t border-slate-100">
-                    <div className="flex items-center justify-between gap-2 mb-2">
-                      <span className="text-xs font-bold uppercase text-slate-500">
-                        Descuento de este producto
-                      </span>
-
-                      {discountAmount > 0 && (
-                        <span className="text-xs font-semibold text-emerald-600">
-                          - ${formatMoney(discountAmount)}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="flex gap-2">
-                      <div className="flex bg-slate-100 rounded-lg p-1 border border-slate-200 shrink-0">
-                        <button
-                          type="button"
-                          title="Descuento porcentual"
-                          onClick={() => updateDiscountType(item.productId, 'percent')}
-                          className={`p-1.5 rounded ${
-                            (item.discountType || 'percent') === 'percent'
-                              ? 'bg-white shadow text-indigo-600'
-                              : 'text-slate-400 hover:text-slate-600'
-                          }`}
-                        >
-                          <Percent size={15} />
-                        </button>
-
-                        <button
-                          type="button"
-                          title="Descuento en pesos"
-                          onClick={() => updateDiscountType(item.productId, 'amount')}
-                          className={`p-1.5 rounded ${
-                            item.discountType === 'amount'
-                              ? 'bg-white shadow text-indigo-600'
-                              : 'text-slate-400 hover:text-slate-600'
-                          }`}
-                        >
-                          <DollarSign size={15} />
-                        </button>
-                      </div>
-
-                      <input
-                        type="number"
-                        min="0"
-                        max={item.discountType === 'percent' ? 100 : undefined}
-                        placeholder={item.discountType === 'amount' ? '$ 0' : '0 %'}
-                        className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                        value={item.discountValue || ''}
-                        onChange={(e) =>
-                          updateDiscountValue(item.productId, e.target.value)
-                        }
-                      />
-                    </div>
-                  </div>
-
-                  <div className="mt-3 flex justify-between items-end bg-indigo-50 rounded-lg px-3 py-2">
-                    <span className="text-xs font-semibold text-indigo-700 uppercase">
-                      Total producto
-                    </span>
-                    <span className="text-lg font-bold text-indigo-700">
-                      ${formatMoney(item.subtotal)}
-                    </span>
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-
-        <div className="p-4 border-t border-slate-200 bg-slate-50 rounded-b-xl space-y-4">
-          {/* TOTAL GENERAL */}
-          <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-1.5">
-            <div className="flex justify-between text-sm text-slate-500">
-              <span>Subtotal productos</span>
-              <span>${formatMoney(grossSubtotal)}</span>
-            </div>
-
-            {totalDiscount > 0 && (
-              <div className="flex justify-between text-sm text-emerald-600 font-medium">
-                <span>Descuentos</span>
-                <span>- ${formatMoney(totalDiscount)}</span>
-              </div>
-            )}
-
-            <div className="flex justify-between items-center pt-2 border-t border-slate-200">
-              <span className="text-base font-bold text-slate-800">TOTAL</span>
-              <span className="text-3xl font-bold text-indigo-600">
-                ${formatMoney(finalTotal)}
-              </span>
-            </div>
-          </div>
-
-          {/* FORMA DE PAGO */}
-          <div>
-            <label className="block text-xs font-bold text-slate-500 uppercase mb-2">
-              Forma de pago
-            </label>
-
-            <div className="grid grid-cols-4 gap-2">
-              <button
-                type="button"
-                onClick={() => setPaymentAndReset('cash')}
-                className={paymentButtonClass(paymentMethod === 'cash')}
-              >
-                <Banknote size={15} />
-                <span className="hidden sm:inline">Efectivo</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setPaymentAndReset('card')}
-                className={paymentButtonClass(paymentMethod === 'card')}
-              >
-                <CreditCard size={15} />
-                <span className="hidden sm:inline">Tarjeta</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setPaymentAndReset('transfer')}
-                className={paymentButtonClass(paymentMethod === 'transfer')}
-              >
-                <Landmark size={15} />
-                <span className="hidden sm:inline">Transf.</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setPaymentAndReset('mixed')}
-                className={paymentButtonClass(paymentMethod === 'mixed')}
-              >
-                <WalletCards size={15} />
-                <span className="hidden sm:inline">Mixto</span>
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setPaymentAndReset('mixed')
+              }
+              className={paymentButtonClass(
+                paymentMethod === 'mixed',
+              )}
+            >
+              <WalletCards size={15} />
+              Mixto
+            </button>
           </div>
 
           {paymentMethod === 'mixed' && (
-            <div className="bg-white border border-indigo-200 rounded-xl p-3 space-y-3">
-              <div className="text-sm font-bold text-slate-700">
-                Distribuir ${formatMoney(finalTotal)} entre medios de pago
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-3">
+              <div className="text-sm font-semibold text-slate-700">
+                Distribuir $
+                {formatMoney(finalTotal)}
               </div>
 
               {(
                 [
-                  ['cash', 'Efectivo', Banknote],
-                  ['card', 'Tarjeta', CreditCard],
-                  ['transfer', 'Transferencia', Landmark],
+                  [
+                    'cash',
+                    'Efectivo',
+                    Banknote,
+                  ],
+                  [
+                    'card',
+                    'Tarjeta',
+                    CreditCard,
+                  ],
+                  [
+                    'transfer',
+                    'Transferencia',
+                    Landmark,
+                  ],
                 ] as const
-              ).map(([method, label, Icon]) => (
-                <div key={method} className="grid grid-cols-[120px_1fr_auto] gap-2 items-center">
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
-                    <Icon size={15} /> {label}
-                  </div>
-
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="$ 0"
-                    className="min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    value={mixedPayments[method]}
-                    onChange={(e) => {
-                      setCheckoutError('');
-                      setMixedPayments((prev) => ({
-                        ...prev,
-                        [method]: e.target.value,
-                      }));
-                    }}
-                  />
-
-                  <button
-                    type="button"
-                    onClick={() => completeRemainingWith(method)}
-                    className="text-[11px] font-semibold px-2 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-600"
-                    title="Completar el importe que falta con este medio"
+              ).map(
+                ([method, label, Icon]) => (
+                  <div
+                    key={method}
+                    className="grid grid-cols-[115px_1fr_auto] gap-2 items-center"
                   >
-                    Resto
-                  </button>
-                </div>
-              ))}
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                      <Icon size={15} />
+                      {label}
+                    </div>
 
-              <div className="pt-2 border-t border-slate-100 space-y-1">
-                <div className="flex justify-between text-xs text-slate-500">
-                  <span>Asignado</span>
-                  <span>${formatMoney(mixedAssigned)}</span>
-                </div>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="$ 0"
+                      value={
+                        mixedPayments[
+                          method
+                        ]
+                      }
+                      onChange={(e) => {
+                        setCheckoutError(
+                          '',
+                        );
+                        setMixedPayments(
+                          (prev) => ({
+                            ...prev,
+                            [method]:
+                              e.target
+                                .value,
+                          }),
+                        );
+                      }}
+                      className="min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+                    />
 
+                    <button
+                      type="button"
+                      onClick={() =>
+                        completeRemainingWith(
+                          method,
+                        )
+                      }
+                      className="text-[11px] font-semibold px-2 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-slate-600"
+                    >
+                      Resto
+                    </button>
+                  </div>
+                ),
+              )}
+
+              <div className="pt-2 border-t border-slate-200">
                 <div
                   className={`flex justify-between text-sm font-bold ${
                     mixedPaymentValid
@@ -896,14 +1522,22 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                   <span>
                     {mixedPaymentValid
                       ? 'Pago completo'
-                      : paymentDifference > 0
+                      : paymentDifference >
+                          0
                         ? 'Falta'
                         : 'Excede'}
                   </span>
+
                   <span>
                     {mixedPaymentValid
-                      ? 'OK'
-                      : `$${formatMoney(Math.abs(paymentDifference))}`}
+                      ? `Asignado $${formatMoney(
+                          mixedAssigned,
+                        )}`
+                      : `$${formatMoney(
+                          Math.abs(
+                            paymentDifference,
+                          ),
+                        )}`}
                   </span>
                 </div>
               </div>
@@ -912,7 +1546,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
           {checkoutError && (
             <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2.5 flex gap-2 text-sm">
-              <AlertTriangle size={17} className="shrink-0 mt-0.5" />
+              <AlertTriangle
+                size={17}
+                className="shrink-0 mt-0.5"
+              />
               <span>{checkoutError}</span>
             </div>
           )}
@@ -924,21 +1561,28 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               cart.length === 0 ||
               finalTotal <= 0 ||
               isProcessing ||
-              (paymentMethod === 'mixed' && !mixedPaymentValid)
+              (paymentMethod === 'mixed' &&
+                !mixedPaymentValid)
             }
             className={`w-full py-4 rounded-xl font-bold text-lg shadow-md transition-all flex items-center justify-center gap-2 ${
               cart.length > 0 &&
               finalTotal > 0 &&
               !isProcessing &&
-              (paymentMethod !== 'mixed' || mixedPaymentValid)
+              (paymentMethod !== 'mixed' ||
+                mixedPaymentValid)
                 ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200'
                 : 'bg-slate-300 text-slate-500 cursor-not-allowed'
             }`}
           >
-            {isProcessing && <Loader2 className="animate-spin" />}
+            {isProcessing && (
+              <Loader2 className="animate-spin" />
+            )}
+
             {isProcessing
               ? 'Procesando...'
-              : `Confirmar venta · $${formatMoney(finalTotal)}`}
+              : `Confirmar venta · $${formatMoney(
+                  finalTotal,
+                )}`}
           </button>
         </div>
       </div>
@@ -946,14 +1590,18 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       <BarcodeScannerModal
         open={isScannerOpen}
         title="Escanear para agregar a la venta"
-        onClose={() => setIsScannerOpen(false)}
+        onClose={() =>
+          setIsScannerOpen(false)
+        }
         onDetected={handleBarcodeDetected}
       />
 
       {successMsg && (
-        <div className="fixed top-4 right-4 bg-green-500 text-white px-6 py-4 rounded-xl shadow-lg z-50 flex items-center gap-3 animate-fade-in-up">
-          <CheckCircle size={24} />
-          <span className="font-semibold">{successMsg}</span>
+        <div className="fixed top-4 right-4 bg-green-500 text-white px-5 py-3 rounded-xl shadow-lg z-50 flex items-center gap-3 animate-fade-in-up">
+          <CheckCircle size={22} />
+          <span className="font-semibold">
+            {successMsg}
+          </span>
         </div>
       )}
     </div>
