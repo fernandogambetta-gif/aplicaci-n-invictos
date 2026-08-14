@@ -6,6 +6,7 @@ import POS from './components/POS';
 import SalesHistory from './components/SalesHistory';
 import AIAdvisor from './components/AIAdvisor';
 import TeamCommissions from './components/TeamCommissions';
+import UserManagement from './components/UserManagement';
 import Login from './components/Login';
 import ProfileModal from './components/ProfileModal';
 import { StorageService } from './services/storageService';
@@ -47,7 +48,6 @@ const App: React.FC = () => {
   // ✅ Log de diagnóstico (sin mostrar secretos)
   useEffect(() => {
     const mode = import.meta.env.MODE;
-
     console.groupCollapsed('🧪 Firebase Config Check');
     console.log('mode:', mode);
     console.log('missing env:', missing);
@@ -60,11 +60,13 @@ const App: React.FC = () => {
 
   const refreshData = useCallback(async () => {
     setIsLoading(true);
+
     try {
       const [prods, sls] = await Promise.all([
         StorageService.getProducts(),
         StorageService.getSales(),
       ]);
+
       setProducts(prods);
       setSales(sls);
     } catch (error) {
@@ -124,6 +126,7 @@ const App: React.FC = () => {
             <ul className="space-y-2 font-mono text-slate-700">
               {REQUIRED_ENV.map((key) => {
                 const ok = !missing.includes(key);
+
                 return (
                   <li key={key} className="flex items-center gap-2">
                     {ok ? (
@@ -180,16 +183,37 @@ const App: React.FC = () => {
             currentUser={currentUser}
           />
         );
+
       case 'pos':
         return <POS products={products} onSaleComplete={refreshData} currentUser={currentUser} />;
+
       case 'inventory':
         return <Inventory products={products} onUpdate={refreshData} />;
+
       case 'history':
         return <SalesHistory sales={sales} currentUser={currentUser} />;
+
       case 'team':
         return <TeamCommissions sales={sales} currentUser={currentUser} onUpdate={refreshData} />;
+
+      case 'users':
+        return currentUser.role === 'admin' ? (
+          <UserManagement
+            currentUser={currentUser}
+            onCurrentUserUpdate={setCurrentUser}
+          />
+        ) : (
+          <Dashboard
+            products={products}
+            sales={sales}
+            onNavigate={setCurrentView}
+            currentUser={currentUser}
+          />
+        );
+
       case 'ai':
         return currentUser.role === 'admin' ? <AIAdvisor products={products} sales={sales} /> : null;
+
       default:
         return (
           <Dashboard
