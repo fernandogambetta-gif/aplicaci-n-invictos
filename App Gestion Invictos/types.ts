@@ -1,9 +1,8 @@
-
 export type UserRole = 'admin' | 'seller';
 
 export interface UserSecurity {
   failedAttempts: number;
-  lockoutUntil: number | null; // Timestamp
+  lockoutUntil: number | null;
   consecutiveLockouts: number;
   isPermanentlyBlocked: boolean;
 }
@@ -14,7 +13,7 @@ export interface User {
   role: UserRole;
   pin: string;
   commissionPercentage?: number;
-  security?: UserSecurity; // New security field
+  security?: UserSecurity;
 }
 
 export interface AppConfig {
@@ -35,16 +34,29 @@ export interface ProviderItem {
 export interface Product {
   id: string;
   code: string;
+  barcode?: string;
+  parentProductId?: string;
+
   name: string;
   category: string;
   provider: string;
   price: number;
   cost: number;
   stock: number;
-  description?: string;
-   
-}
 
+  size?: string;
+  color?: string;
+  gender?: string;
+  description?: string;
+
+  minStock?: number;
+  active?: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+
+  // Compatibilidad con Inventory.tsx actual
+  commissionPercentage?: number;
+}
 
 export interface SaleItem {
   productId: string;
@@ -53,20 +65,55 @@ export interface SaleItem {
   priceAtSale: number;
   subtotal: number;
   commissionAmount?: number;
+
+  productCode?: string;
+  barcode?: string;
+  size?: string;
+  color?: string;
 }
 
 export interface Sale {
   id: string;
   items: SaleItem[];
-  subtotal: number; // Suma de los items antes de descuento
-  discount: number; // Monto descontado
-  total: number; // Total final pagado
+  subtotal: number;
+  discount: number;
+  total: number;
   timestamp: number;
   paymentMethod: 'cash' | 'card' | 'transfer';
   userId: string;
   userName: string;
-  commissionPaid?: boolean; // Nuevo: Estado de pago de la comisión
-  commissionPaidDate?: number; // Nuevo: Fecha en que se pagó la comisión
+  commissionPaid?: boolean;
+  commissionPaidDate?: number;
+}
+
+export type InventoryMovementType =
+  | 'INITIAL'
+  | 'PURCHASE'
+  | 'SALE'
+  | 'ADJUSTMENT'
+  | 'RETURN'
+  | 'CANCELLED_SALE';
+
+export interface InventoryMovement {
+  id: string;
+  productId: string;
+  productName: string;
+  productCode: string;
+  barcode?: string;
+  size?: string;
+  color?: string;
+
+  type: InventoryMovementType;
+  quantityChange: number;
+  previousStock: number;
+  newStock: number;
+
+  timestamp: number;
+  userId?: string;
+  userName?: string;
+  referenceId?: string;
+  note?: string;
+  unitCost?: number;
 }
 
 export interface DashboardStats {
