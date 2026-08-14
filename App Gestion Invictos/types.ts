@@ -54,8 +54,16 @@ export interface Product {
   createdAt?: number;
   updatedAt?: number;
 
-  // Compatibilidad con Inventory.tsx actual
   commissionPercentage?: number;
+}
+
+export type ItemDiscountType = 'percent' | 'amount';
+export type PaymentMethod = 'cash' | 'card' | 'transfer';
+export type SalePaymentMethod = PaymentMethod | 'mixed';
+
+export interface PaymentAllocation {
+  method: PaymentMethod;
+  amount: number;
 }
 
 export interface SaleItem {
@@ -63,7 +71,18 @@ export interface SaleItem {
   productName: string;
   quantity: number;
   priceAtSale: number;
+
+  // Total bruto de la línea antes del descuento.
+  originalSubtotal?: number;
+
+  // Descuento aplicado únicamente a este producto/línea.
+  discountType?: ItemDiscountType;
+  discountValue?: number;
+  discountAmount?: number;
+
+  // Total neto de la línea después del descuento.
   subtotal: number;
+
   commissionAmount?: number;
 
   productCode?: string;
@@ -75,11 +94,22 @@ export interface SaleItem {
 export interface Sale {
   id: string;
   items: SaleItem[];
+
+  // Suma bruta de todos los productos antes de descuentos por línea.
   subtotal: number;
+
+  // Suma total de descuentos aplicados a los productos.
   discount: number;
+
+  // Importe final de la venta.
   total: number;
+
   timestamp: number;
-  paymentMethod: 'cash' | 'card' | 'transfer';
+
+  // Para ventas mixtas se guarda 'mixed' y el detalle queda en payments.
+  paymentMethod: SalePaymentMethod;
+  payments?: PaymentAllocation[];
+
   userId: string;
   userName: string;
   commissionPaid?: boolean;
