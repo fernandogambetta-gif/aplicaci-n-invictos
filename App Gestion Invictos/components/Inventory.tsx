@@ -27,6 +27,7 @@ import {
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import BarcodeLabelModal from './BarcodeLabelModal';
+import ProviderManagementModal from './ProviderManagementModal';
 
 interface InventoryProps {
   products: Product[];
@@ -65,7 +66,6 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
   // Input states for managers
   const [newCategoryName, setNewCategoryName] = useState('');
-  const [newProviderName, setNewProviderName] = useState('');
 
   const [formError, setFormError] = useState('');
 
@@ -423,30 +423,6 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     if (!confirm('¿Eliminar categoría?')) return;
 
     await StorageService.deleteCategory(id);
-    await loadLists();
-  };
-
-  // ===============================
-  // Providers
-  // ===============================
-
-  const handleAddProvider = async () => {
-    if (!newProviderName.trim()) return;
-
-    const newProv: ProviderItem = {
-      id: Date.now().toString(),
-      name: newProviderName.trim(),
-    };
-
-    await StorageService.saveProvider(newProv);
-    setNewProviderName('');
-    await loadLists();
-  };
-
-  const handleDeleteProvider = async (id: string) => {
-    if (!confirm('¿Eliminar proveedor?')) return;
-
-    await StorageService.deleteProvider(id);
     await loadLists();
   };
 
@@ -1707,87 +1683,13 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         </Portal>
       )}
 
-      {/* PROVIDER MODAL */}
-      {isProviderModalOpen && (
-        <Portal>
-          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
-                <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                  <Briefcase size={20} className="text-slate-700" />
-                  Proveedores
-                </h3>
-
-                <button
-                  type="button"
-                  onClick={() => setIsProviderModalOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-
-              <div className="p-6 space-y-4">
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="Nuevo proveedor..."
-                    className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={newProviderName}
-                    onChange={(e) =>
-                      setNewProviderName(e.target.value)
-                    }
-                  />
-
-                  <button
-                    type="button"
-                    onClick={handleAddProvider}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
-                  >
-                    <Plus size={18} />
-                    Agregar
-                  </button>
-                </div>
-
-                <div className="border border-slate-200 rounded-lg overflow-hidden">
-                  {providers.length === 0 ? (
-                    <div className="p-4 text-sm text-slate-500">
-                      No hay proveedores cargados.
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-slate-100">
-                      {providers.map((p) => (
-                        <div
-                          key={p.id}
-                          className="flex items-center justify-between p-3 hover:bg-slate-50"
-                        >
-                          <span className="text-sm font-medium text-slate-800">
-                            {p.name}
-                          </span>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleDeleteProvider(p.id)
-                            }
-                            className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
-                          >
-                            <Trash2 size={18} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <p className="text-[11px] text-slate-400">
-                  Si eliminás un proveedor usado por productos, los productos conservarán el texto guardado.
-                </p>
-              </div>
-            </div>
-          </div>
-        </Portal>
-      )}
+      {/* PROVIDER MANAGEMENT */}
+      <ProviderManagementModal
+        open={isProviderModalOpen}
+        providers={providers}
+        onClose={() => setIsProviderModalOpen(false)}
+        onSaved={loadLists}
+      />
     </div>
   );
 };
