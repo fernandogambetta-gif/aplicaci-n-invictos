@@ -22,9 +22,11 @@ import {
   Palette,
   AlertTriangle,
   Camera,
+  Printer,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
+import BarcodeLabelModal from './BarcodeLabelModal';
 
 interface InventoryProps {
   products: Product[];
@@ -51,6 +53,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
   const [scanError, setScanError] = useState('');
+  const [labelProduct, setLabelProduct] = useState<Product | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState<string>('ALL');
@@ -838,6 +841,15 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                         <button
                           type="button"
+                          onClick={() => setLabelProduct(product)}
+                          title="Imprimir etiqueta"
+                          className="text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors p-2 rounded-lg"
+                        >
+                          <Printer size={18} />
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => handleEdit(product)}
                           title="Editar producto"
                           className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors p-2 rounded-lg"
@@ -879,6 +891,12 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         title="Escanear producto del inventario"
         onClose={() => setIsScannerOpen(false)}
         onDetected={handleBarcodeDetected}
+      />
+
+      <BarcodeLabelModal
+        open={Boolean(labelProduct)}
+        product={labelProduct}
+        onClose={() => setLabelProduct(null)}
       />
 
       {scannedProduct && (
@@ -933,7 +951,18 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const product = scannedProduct;
+                      setScannedProduct(null);
+                      setLabelProduct(product);
+                    }}
+                    className="py-3 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2"
+                  >
+                    <Printer size={18} /> Etiqueta
+                  </button>
                   <button
                     type="button"
                     onClick={() => {
@@ -1764,4 +1793,3 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 };
 
 export default Inventory;
-
