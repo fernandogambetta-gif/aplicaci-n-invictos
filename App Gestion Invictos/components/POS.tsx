@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Product, SaleItem, Sale, User, AppConfig, CategoryItem } from '../types';
-import { ShoppingCart, Minus, Plus, Trash, CheckCircle, Percent, DollarSign, Loader2 } from 'lucide-react';
+import { ShoppingCart, Minus, Plus, Trash, CheckCircle, Percent, DollarSign, Loader2, Camera, AlertTriangle } from 'lucide-react';
 import { StorageService } from '../services/storageService';
+import BarcodeScannerModal from './BarcodeScannerModal';
 
 interface POSProps {
   products: Product[];
@@ -18,6 +19,8 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const [successMsg, setSuccessMsg] = useState('');
   const [config, setConfig] = useState<AppConfig>({ commissionPercentage: 5 }); // fallback
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [scanError, setScanError] = useState('');
 
   // Discount States
   const [discountType, setDiscountType] = useState<'percent' | 'amount'>('percent');
@@ -74,9 +77,56 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           quantity: 1,
           priceAtSale: price,
           subtotal: price,
+          productCode: product.code,
+          barcode: product.barcode,
+          size: product.size,
+          color: product.color,
         },
       ];
     });
+  };
+
+  const handleBarcodeDetected = async (rawCode: string) => {
+    const code = rawCode.trim();
+    if (!code) return;
+
+    setScanError('');
+
+    let product = products.find(
+      (p) =>
+        (p.barcode || '').trim() === code ||
+        (p.code || '').trim().toLowerCase() === code.toLowerCase(),
+    );
+
+    if (!product) {
+      product = (await StorageService.getProductByBarcode(code)) || undefined;
+    }
+
+    if (!product) {
+      setScanError(`No existe un producto con el código ${code}.`);
+      return;
+    }
+
+    const stock = toNumber(product.stock, 0);
+    const price = toNumber(product.price, 0);
+
+    if (stock <= 0) {
+      setScanError(`${product.name} no tiene stock disponible.`);
+      return;
+    }
+
+    if (price <= 0) {
+      setScanError(`${product.name} no tiene un precio válido.`);
+      return;
+    }
+
+    addToCart(product);
+    setSuccessMsg(
+      `${product.name}${product.color ? ` · ${product.color}` : ''}${
+        product.size ? ` · ${product.size}` : ''
+      } agregado al carrito`,
+    );
+    setTimeout(() => setSuccessMsg(''), 1800);
   };
 
   const removeFromCart = (productId: string) => {
@@ -162,7 +212,15 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       const matchesCat = selectedCategory === 'ALL' || p.category === selectedCategory;
       const name = (p.name || '').toLowerCase();
       const code = (p.code || '').toLowerCase();
-      const matchesSearch = name.includes(searchLower) || code.includes(searchLower);
+      const barcode = (p.barcode || '').toLowerCase();
+      const color = (p.color || '').toLowerCase();
+      const size = (p.size || '').toLowerCase();
+      const matchesSearch =
+        name.includes(searchLower) ||
+        code.includes(searchLower) ||
+        barcode.includes(searchLower) ||
+        color.includes(searchLower) ||
+        size.includes(searchLower);
       return matchesCat && matchesSearch;
     });
   }, [products, selectedCategory, search]);
@@ -173,13 +231,27 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       <div className="flex-1 flex flex-col gap-4">
         {/* Search & Filter */}
         <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col sm:flex-row gap-3">
-          <input
-            type="text"
-            placeholder="Buscar por nombre o código..."
-            className="flex-1 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+          <div className="flex flex-1 gap-2">
+            <input
+              type="text"
+              placeholder="Buscar por nombre, SKU o código de barras..."
+              className="flex-1 min-w-0 px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setScanError('');
+                setIsScannerOpen(true);
+              }}
+              className="shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 font-semibold shadow-sm"
+              title="Escanear con la cámara"
+            >
+              <Camera size={20} />
+              <span className="hidden md:inline">Escanear</span>
+            </button>
+          </div>
           <select
             className="px-4 py-2 border border-slate-300 rounded-lg focus:outline-none bg-white"
             value={selectedCategory}
@@ -193,6 +265,14 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             ))}
           </select>
         </div>
+
+        {scanError && (
+          <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
+            <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+            <div className="flex-1 text-sm">{scanError}</div>
+            <button type="button" onClick={() => setScanError('')} className="text-red-500 hover:text-red-700">×</button>
+          </div>
+        )}
 
         {/* Grid */}
         <div className="flex-1 overflow-y-auto pr-2 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 content-start">
@@ -261,6 +341,11 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               <div key={item.productId} className="flex justify-between items-center bg-slate-50 p-3 rounded-lg">
                 <div className="flex-1 min-w-0 pr-2">
                   <p className="font-medium text-slate-800 truncate">{item.productName}</p>
+                  {(item.color || item.size) && (
+                    <p className="text-xs text-slate-500 truncate">
+                      {[item.color, item.size ? `Talle ${item.size}` : ''].filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                   <p className="text-sm text-indigo-600 font-semibold">${item.subtotal}</p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -392,6 +477,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           </button>
         </div>
       </div>
+
+      <BarcodeScannerModal
+        open={isScannerOpen}
+        title="Escanear para agregar a la venta"
+        onClose={() => setIsScannerOpen(false)}
+        onDetected={handleBarcodeDetected}
+      />
 
       {successMsg && (
         <div className="fixed top-4 right-4 bg-green-500 text-white px-6 py-4 rounded-xl shadow-lg z-50 flex items-center gap-3 animate-fade-in-up">
