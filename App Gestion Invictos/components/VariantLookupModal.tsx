@@ -69,6 +69,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
   const [search, setSearch] = useState('');
   const [selectedGroupKey, setSelectedGroupKey] = useState('');
   const [onlyWithStock, setOnlyWithStock] = useState(true);
+  const [matchedVariant, setMatchedVariant] = useState<Product | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -76,6 +77,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
     setSearch('');
     setSelectedGroupKey('');
     setOnlyWithStock(true);
+    setMatchedVariant(null);
   }, [open]);
 
   const groups = useMemo<ProductGroup[]>(() => {
@@ -111,6 +113,55 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
       a.name.localeCompare(b.name, 'es'),
     );
   }, [products]);
+
+  const findExactVariant = (value: string): Product | null => {
+    const term = value.trim().toLowerCase();
+    if (!term) return null;
+
+    return (
+      products.find((product) => {
+        const code = (product.code || '').trim().toLowerCase();
+        const barcode = (product.barcode || '').trim().toLowerCase();
+
+        return code === term || barcode === term;
+      }) || null
+    );
+  };
+
+  const selectGroupForVariant = (variant: Product) => {
+    const key = normalize(variant.name || '');
+
+    if (key) {
+      setSelectedGroupKey(key);
+      setMatchedVariant(variant);
+    }
+  };
+
+  const handleSearchChange = (value: string) => {
+    setSearch(value);
+
+    const exact = findExactVariant(value);
+
+    if (exact) {
+      selectGroupForVariant(exact);
+    } else {
+      setMatchedVariant(null);
+    }
+  };
+
+  const handleSearchEnter = () => {
+    const exact = findExactVariant(search);
+
+    if (exact) {
+      selectGroupForVariant(exact);
+      return;
+    }
+
+    // Si la búsqueda deja un solo modelo visible, lo abrimos automáticamente.
+    if (filteredGroups.length === 1) {
+      setSelectedGroupKey(filteredGroups[0].key);
+    }
+  };
 
   const filteredGroups = useMemo(() => {
     const term = normalize(search);
@@ -266,15 +317,25 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
                 <input
                   type="text"
                   value={search}
-                  onChange={(e) => setSearch(e.target.value)}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleSearchEnter();
+                    }
+                  }}
                   autoFocus
-                  placeholder="Ej.: Remera Training..."
+                  placeholder="Nombre, SKU o código de barras..."
                   className="w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
 
               <div className="text-xs text-slate-400 mt-2">
                 {filteredGroups.length} producto(s) encontrado(s)
+              </div>
+
+              <div className="text-[11px] text-slate-400 mt-1">
+                También podés escribir o pegar el SKU / código interno o el código de barras y presionar Enter.
               </div>
             </div>
 
@@ -299,7 +360,10 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
                       <button
                         key={group.key}
                         type="button"
-                        onClick={() => setSelectedGroupKey(group.key)}
+                        onClick={() => {
+                          setSelectedGroupKey(group.key);
+                          setMatchedVariant(null);
+                        }}
                         className={`w-full p-4 text-left transition-colors ${
                           selectedGroupKey === group.key
                             ? 'bg-indigo-50 border-l-4 border-indigo-600'
@@ -385,6 +449,64 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
                     </div>
                   </div>
                 </div>
+
+                {matchedVariant && selectedGroupKey === normalize(matchedVariant.name || '') && (
+                  <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+                    <div className="text-xs uppercase font-bold tracking-wide text-emerald-600">
+                      Código encontrado
+                    </div>
+
+                    <div className="mt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-slate-900">
+                          {matchedVariant.name}
+                        </div>
+
+                        <div className="text-sm text-slate-600 mt-1">
+                          {[
+                            matchedVariant.color,
+                            matchedVariant.size ? `Talle ${matchedVariant.size}` : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' · ') || 'Sin variante'}
+                        </div>
+
+                        <div className="text-xs text-slate-500 font-mono mt-1">
+                          SKU: {matchedVariant.code || '—'}
+                          {matchedVariant.barcode
+                            ? ` · Código de barras: ${matchedVariant.barcode}`
+                            : ''}
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <div className="text-[10px] uppercase font-bold text-slate-400">
+                          Stock de esta variante
+                        </div>
+                        <div
+                          className={`text-2xl font-bold ${
+                            Number(matchedVariant.stock || 0) > 0
+                              ? 'text-emerald-700'
+                              : 'text-red-600'
+                          }`}
+                        >
+                          {Number(matchedVariant.stock || 0)} u.
+                        </div>
+                      </div>
+                    </div>
+
+                    {onSelectProduct && Number(matchedVariant.stock || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleSelectVariant(matchedVariant)}
+                        className="mt-3 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold flex items-center gap-2"
+                      >
+                        <Plus size={15} />
+                        Agregar esta variante
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {/* RESUMEN */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
