@@ -85,6 +85,13 @@ const App: React.FC = () => {
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
+
+    // Si el administrador blanqueó su PIN, obligamos al usuario
+    // a cambiar la clave temporal antes de seguir usando INVICTOS.
+    if (user.mustChangePin) {
+      setIsProfileOpen(true);
+    }
+
     // refreshData corre por useEffect
   };
 
@@ -98,7 +105,8 @@ const App: React.FC = () => {
   const handleUpdateUser = async (updatedUser: User) => {
     await StorageService.updateUser(updatedUser);
     setCurrentUser(updatedUser);
-    alert('Contraseña actualizada correctamente.');
+    setIsProfileOpen(false);
+    alert('PIN / contraseña actualizada correctamente.');
   };
 
   // --- MISSING CONFIG SCREEN ---
@@ -262,7 +270,12 @@ const App: React.FC = () => {
       {isProfileOpen && (
         <ProfileModal
           user={currentUser}
-          onClose={() => setIsProfileOpen(false)}
+          forceChange={Boolean(currentUser.mustChangePin)}
+          onClose={() => {
+            if (!currentUser.mustChangePin) {
+              setIsProfileOpen(false);
+            }
+          }}
           onUpdate={handleUpdateUser}
         />
       )}
