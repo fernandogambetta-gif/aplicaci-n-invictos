@@ -28,6 +28,7 @@ import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import BarcodeLabelModal from './BarcodeLabelModal';
 import ProviderManagementModal from './ProviderManagementModal';
+import VariantLookupModal from './VariantLookupModal';
 
 interface InventoryProps {
   products: Product[];
@@ -55,6 +56,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
   const [scanError, setScanError] = useState('');
   const [labelProduct, setLabelProduct] = useState<Product | null>(null);
+  const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState('');
   const [filterCategory, setFilterCategory] = useState<string>('ALL');
@@ -529,6 +531,15 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
+            onClick={() => setIsVariantLookupOpen(true)}
+            className="bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
+          >
+            <Shirt size={20} />
+            Talles / Colores
+          </button>
+
+          <button
+            type="button"
             onClick={() => {
               setScanError('');
               setIsScannerOpen(true);
@@ -867,6 +878,12 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         title="Escanear producto del inventario"
         onClose={() => setIsScannerOpen(false)}
         onDetected={handleBarcodeDetected}
+      />
+
+      <VariantLookupModal
+        open={isVariantLookupOpen}
+        products={products}
+        onClose={() => setIsVariantLookupOpen(false)}
       />
 
       <BarcodeLabelModal
