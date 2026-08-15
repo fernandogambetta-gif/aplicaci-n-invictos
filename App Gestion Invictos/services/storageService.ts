@@ -69,6 +69,8 @@ const mapDocs = <T>(snapshot: any): T[] =>
   snapshot.docs.map((d: any) => ({ ...d.data(), id: d.id })) as T[];
 
 const normalizeBarcode = (value: string): string => (value || '').trim();
+const normalizeShortCode = (value: string): string =>
+  (value || '').replace(/\D/g, '').trim();
 
 const getNumericStock = (value: unknown): number => {
   const n = Number(value);
@@ -328,56 +330,115 @@ export const StorageService = {
   },
 
   /**
-   * Busca primero por barcode.
-   * Si no encuentra nada, intenta por code.
-   * Esto permite que productos anteriores sigan siendo localizables.
+   * Busca por código corto QR, luego barcode largo y finalmente SKU.
+   * Se mantiene este nombre de función para no romper componentes existentes.
    */
-  getProductByBarcode: async (barcodeOrCode: string): Promise<Product | null> => {
+  getProductByBarcode: async (valueToFind: string): Promise<Product | null> => {
     if (!db) return null;
 
-    const value = normalizeBarcode(barcodeOrCode);
+    const value = (valueToFind || '').trim();
     if (!value) return null;
 
-    const barcodeQuery = query(
-      collection(db, COLLECTIONS.PRODUCTS),
-      where('barcode', '==', value),
-      limit(1),
-    );
+    const searches: Array<{
+      field: 'shortCode' | 'barcode' | 'code';
+      value: string;
+    }> = [
+      { field: 'shortCode', value: normalizeShortCode(value) },
+      { field: 'barcode', value },
+      { field: 'code', value },
+    ];
 
-    const barcodeSnap = await getDocs(barcodeQuery);
+    for (const search of searches) {
+      if (!search.value) continue;
 
-    if (!barcodeSnap.empty) {
-      const d = barcodeSnap.docs[0];
-      const data = d.data() as Product;
+      const productQuery = query(
+        collection(db, COLLECTIONS.PRODUCTS),
+        where(search.field, '==', search.value),
+        limit(1),
+      );
 
-      return {
-        ...data,
-        id: d.id,
-        stock: getNumericStock(data.stock),
-      };
-    }
+      const productSnap = await getDocs(productQuery);
 
-    const codeQuery = query(
-      collection(db, COLLECTIONS.PRODUCTS),
-      where('code', '==', value),
-      limit(1),
-    );
+      if (!productSnap.empty) {
+        const d = productSnap.docs[0];
+        const data = d.data() as Product;
 
-    const codeSnap = await getDocs(codeQuery);
-
-    if (!codeSnap.empty) {
-      const d = codeSnap.docs[0];
-      const data = d.data() as Product;
-
-      return {
-        ...data,
-        id: d.id,
-        stock: getNumericStock(data.stock),
-      };
+        return {
+          ...data,
+          id: d.id,
+          stock: getNumericStock(data.stock),
+        };
+      }
     }
 
     return null;
   },
+
+  /**
+   * Migra productos anteriores para que todos tengan un código corto único.
+   * También corrige códigos cortos duplicados o inválidos.
+   */
+  ensureProductShortCodes: async (): Promise<number> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const snap = await getDocs(collection(db, COLLECTIONS.PRODUCTS));
+    if (snap.empty) return 0;
+
+    const productDocs = [...snap.docs].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    );
+
+    const used = new Set<string>();
+    const toAssign: typeof productDocs = [];
+
+    productDocs.forEach((productDoc) => {
+      const data = productDoc.data() as Product;
+      const current = normalizeShortCode(data.shortCode || '');
+      const valid = /^\d{4,6}$/.test(current);
+
+      if (valid && !used.has(current)) {
+        used.add(current);
+      } else {
+        toAssign.push(productDoc);
+      }
+    });
+
+    if (toAssign.length === 0) return 0;
+
+    let candidate = 1000;
+
+    const nextFree = (): string => {
+      while (used.has(String(candidate))) {
+        candidate += 1;
+      }
+
+      const code = String(candidate);
+      used.add(code);
+      candidate += 1;
+      return code;
+    };
+
+    let updated = 0;
+
+    for (let startIndex = 0; startIndex < toAssign.length; startIndex += 400) {
+      const batch = writeBatch(db);
+      const chunk = toAssign.slice(startIndex, startIndex + 400);
+      const now = Date.now();
+
+      chunk.forEach((productDoc) => {
+        batch.update(productDoc.ref, {
+          shortCode: nextFree(),
+          updatedAt: now,
+        });
+      });
+
+      await batch.commit();
+      updated += chunk.length;
+    }
+
+    return updated;
+  },
+
 
   saveProduct: async (product: Product): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
@@ -386,6 +447,9 @@ export const StorageService = {
 
     const data: any = cleanData({
       ...product,
+      shortCode: product.shortCode
+        ? normalizeShortCode(product.shortCode)
+        : undefined,
       barcode: product.barcode
         ? normalizeBarcode(product.barcode)
         : undefined,
