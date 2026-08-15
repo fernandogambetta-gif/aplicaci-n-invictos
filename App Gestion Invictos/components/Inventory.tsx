@@ -23,6 +23,7 @@ import {
   AlertTriangle,
   Camera,
   Printer,
+  Megaphone,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
@@ -86,6 +87,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     color: '',
     gender: '',
     description: '',
+    salesNote: '',
     active: true,
     commissionPercentage: undefined,
   });
@@ -185,6 +187,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     color: '',
     gender: '',
     description: '',
+    salesNote: '',
     active: true,
     commissionPercentage: undefined,
   });
@@ -204,6 +207,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       color: '',
       gender: '',
       description: '',
+      salesNote: '',
       active: true,
       commissionPercentage: undefined,
     });
@@ -322,6 +326,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
         color: (formData.color || '').trim(),
         gender: (formData.gender || '').trim(),
         description: (formData.description as string) || '',
+        salesNote: (formData.salesNote as string) || '',
         active: formData.active !== false,
         createdAt: formData.createdAt,
         updatedAt: formData.updatedAt,
@@ -357,6 +362,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       size: product.size || '',
       color: product.color || '',
       gender: product.gender || '',
+      salesNote: product.salesNote || '',
     });
     setIsModalOpen(true);
   };
@@ -453,6 +459,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       p.color,
       p.gender,
       p.description,
+      p.salesNote,
     ]
       .filter(Boolean)
       .join(' ')
@@ -774,6 +781,13 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                       {product.description && (
                         <div className="text-xs text-slate-500 mt-1.5">
                           {product.description}
+                        </div>
+                      )}
+
+                      {product.salesNote && (
+                        <div className="mt-2 inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold">
+                          <Megaphone size={13} className="shrink-0 mt-0.5" />
+                          <span>{product.salesNote}</span>
                         </div>
                       )}
                     </td>
@@ -1579,6 +1593,30 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                       })
                     }
                   />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-2">
+                    <Megaphone size={16} className="text-amber-600" />
+                    Aviso en ventas / promoción
+                  </label>
+
+                  <textarea
+                    rows={2}
+                    placeholder="Ej.: 10% de descuento pagando en efectivo"
+                    className="w-full border border-amber-300 bg-amber-50/40 rounded-lg p-2.5 focus:ring-2 focus:ring-amber-500 focus:outline-none resize-y"
+                    value={(formData.salesNote as string) || ''}
+                    onChange={(e) =>
+                      setFormData({
+                        ...formData,
+                        salesNote: e.target.value,
+                      })
+                    }
+                  />
+
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Esta leyenda se mostrará al vendedor en Caja. Es informativa: no aplica el descuento automáticamente.
+                  </p>
                 </div>
               </div>
 
