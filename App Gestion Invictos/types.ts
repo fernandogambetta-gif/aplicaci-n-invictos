@@ -69,6 +69,11 @@ export interface ProviderItem {
 export interface Product {
   id: string;
   code: string;
+
+  // Código corto numérico usado por el QR y la búsqueda rápida.
+  shortCode?: string;
+
+  // Se conserva el código de barras largo por compatibilidad.
   barcode?: string;
   parentProductId?: string;
 
@@ -124,6 +129,7 @@ export interface SaleItem {
   commissionAmount?: number;
 
   productCode?: string;
+  shortCode?: string;
   barcode?: string;
   size?: string;
   color?: string;
