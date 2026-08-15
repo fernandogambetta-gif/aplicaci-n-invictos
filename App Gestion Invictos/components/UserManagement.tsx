@@ -15,6 +15,10 @@ import {
   UserRound,
   Users,
   X,
+  RotateCcw,
+  ShoppingCart,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import { User, UserRole } from '../types';
 import { StorageService } from '../services/storageService';
@@ -22,6 +26,8 @@ import { StorageService } from '../services/storageService';
 interface UserManagementProps {
   currentUser: User;
   onCurrentUserUpdate: (user: User) => void;
+  salesCount: number;
+  onDataReset: () => void | Promise<void>;
 }
 
 interface UserFormState {
@@ -41,6 +47,8 @@ const EMPTY_FORM: UserFormState = {
 const UserManagement: React.FC<UserManagementProps> = ({
   currentUser,
   onCurrentUserUpdate,
+  salesCount,
+  onDataReset,
 }) => {
   const [users, setUsers] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -52,6 +60,14 @@ const UserManagement: React.FC<UserManagementProps> = ({
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [form, setForm] = useState<UserFormState>(EMPTY_FORM);
   const [showPin, setShowPin] = useState(false);
+
+  // Reset administrativo de ventas / historial
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [resetStep, setResetStep] = useState<1 | 2>(1);
+  const [resetPin, setResetPin] = useState('');
+  const [showResetPin, setShowResetPin] = useState(false);
+  const [isResettingSales, setIsResettingSales] = useState(false);
+  const [resetError, setResetError] = useState('');
 
   const loadUsers = async () => {
     setIsLoading(true);
@@ -244,6 +260,85 @@ const UserManagement: React.FC<UserManagementProps> = ({
     } catch (e: any) {
       console.error('Error eliminando usuario:', e);
       setError(e?.message || 'No se pudo eliminar el usuario.');
+    }
+  };
+
+  const openResetSales = () => {
+    clearMessages();
+    setResetStep(1);
+    setResetPin('');
+    setShowResetPin(false);
+    setResetError('');
+    setIsResetModalOpen(true);
+  };
+
+  const closeResetSales = () => {
+    if (isResettingSales) return;
+
+    setIsResetModalOpen(false);
+    setResetStep(1);
+    setResetPin('');
+    setShowResetPin(false);
+    setResetError('');
+  };
+
+  const handleResetSales = async () => {
+    setResetError('');
+
+    if (currentUser.role !== 'admin') {
+      setResetError('Acceso denegado. Solo un administrador puede realizar esta acción.');
+      return;
+    }
+
+    if (!/^\d{4}$/.test(resetPin.trim())) {
+      setResetError('Ingresá nuevamente tu PIN de administrador de 4 dígitos.');
+      return;
+    }
+
+    if (resetPin.trim() !== (currentUser.pin || '').trim()) {
+      setResetError('PIN de administrador incorrecto. El reseteo fue cancelado.');
+      setResetPin('');
+      return;
+    }
+
+    setIsResettingSales(true);
+
+    try {
+      const result = await StorageService.resetSalesAndRestoreStock(
+        currentUser,
+        resetPin,
+      );
+
+      await Promise.resolve(onDataReset());
+
+      setIsResetModalOpen(false);
+      setResetStep(1);
+      setResetPin('');
+      setShowResetPin(false);
+
+      if (result.salesDeleted === 0) {
+        setSuccess('No había ventas registradas para resetear.');
+        return;
+      }
+
+      const missingWarning =
+        result.missingProducts > 0
+          ? ` Atención: ${result.missingProducts} producto(s) de ventas anteriores ya no existían y no pudieron recuperar stock.`
+          : '';
+
+      setSuccess(
+        `Reset completado: ${result.salesDeleted} venta(s) eliminada(s) del historial y ` +
+          `${result.unitsRestored} unidad(es) devuelta(s) al stock en ` +
+          `${result.productsAdjusted} producto(s).${missingWarning}`,
+      );
+    } catch (e: any) {
+      console.error('Error reseteando ventas:', e);
+      setResetError(
+        e?.message ||
+          'No se pudieron resetear las ventas. No se realizaron cambios.',
+      );
+    } finally {
+      setIsResettingSales(false);
     }
   };
 
@@ -470,6 +565,55 @@ const UserManagement: React.FC<UserManagementProps> = ({
         )}
       </div>
 
+      {/* MANTENIMIENTO - SOLO ADMINISTRADOR */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+        <div className="px-5 py-4 bg-slate-50 border-b border-slate-200">
+          <h3 className="font-bold text-slate-800 flex items-center gap-2">
+            <RotateCcw size={19} className="text-red-600" />
+            Mantenimiento
+          </h3>
+          <p className="text-xs text-slate-500 mt-1">
+            Acciones administrativas sobre datos de prueba.
+          </p>
+        </div>
+
+        <div className="p-5">
+          <div className="border border-red-200 bg-red-50 rounded-xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="flex gap-3">
+              <div className="w-11 h-11 rounded-xl bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                <ShoppingCart size={22} />
+              </div>
+
+              <div>
+                <div className="font-semibold text-slate-900">
+                  Resetear Ventas e Historial
+                </div>
+
+                <p className="text-sm text-slate-600 mt-1 max-w-2xl">
+                  Elimina todas las ventas registradas y deja vacío el Historial.
+                  Las unidades descontadas por esas ventas se devuelven automáticamente
+                  al stock. No se eliminan productos, usuarios, categorías ni proveedores.
+                </p>
+
+                <div className="mt-2 text-xs font-bold text-red-700">
+                  Ventas actualmente registradas: {salesCount.toLocaleString('es-AR')}
+                </div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={openResetSales}
+              disabled={salesCount === 0}
+              className="shrink-0 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <RotateCcw size={18} />
+              Resetear ventas
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800 flex gap-3">
         <KeyRound size={20} className="shrink-0 mt-0.5" />
         <div>
@@ -479,6 +623,181 @@ const UserManagement: React.FC<UserManagementProps> = ({
           </div>
         </div>
       </div>
+
+      {isResetModalOpen && (
+        <div className="fixed inset-0 z-[10000] bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="px-6 py-4 bg-red-50 border-b border-red-200 flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-red-800 flex items-center gap-2">
+                  <AlertTriangle size={20} />
+                  Resetear Ventas e Historial
+                </h3>
+                <p className="text-xs text-red-600 mt-1">
+                  Acción administrativa irreversible sobre el historial de ventas.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeResetSales}
+                disabled={isResettingSales}
+                className="p-1 text-red-400 hover:text-red-700 disabled:opacity-40"
+              >
+                <X size={21} />
+              </button>
+            </div>
+
+            {resetStep === 1 ? (
+              <div className="p-6 space-y-5">
+                <div className="w-16 h-16 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
+                  <RotateCcw size={30} />
+                </div>
+
+                <div className="text-center">
+                  <h4 className="text-xl font-bold text-slate-900">
+                    Primera confirmación
+                  </h4>
+                  <p className="text-sm text-slate-600 mt-2">
+                    Se eliminarán <b>{salesCount.toLocaleString('es-AR')} venta(s)</b>
+                    {' '}y el Historial de Ventas quedará vacío.
+                  </p>
+                </div>
+
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800 space-y-2">
+                  <div className="font-semibold">Antes de continuar:</div>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>Se borrarán todas las ventas registradas.</li>
+                    <li>Se eliminará también el historial derivado de esas ventas.</li>
+                    <li>Las unidades vendidas se devolverán automáticamente al stock.</li>
+                    <li>No se borrarán productos, usuarios, categorías ni proveedores.</li>
+                  </ul>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={closeResetSales}
+                    className="py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                  >
+                    Cancelar
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetError('');
+                      setResetStep(2);
+                    }}
+                    className="py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold"
+                  >
+                    Sí, continuar
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="p-6 space-y-5">
+                <div>
+                  <div className="text-xs uppercase font-bold tracking-wide text-red-500">
+                    Segunda confirmación
+                  </div>
+                  <h4 className="text-xl font-bold text-slate-900 mt-1">
+                    Reingresá tu contraseña / PIN
+                  </h4>
+                  <p className="text-sm text-slate-500 mt-1">
+                    Por seguridad, confirmá nuevamente tu identidad como administrador.
+                  </p>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                  <div className="text-xs text-slate-500">Administrador conectado</div>
+                  <div className="font-bold text-slate-900 mt-0.5">
+                    {currentUser.name}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                    PIN de administrador
+                  </label>
+
+                  <div className="relative">
+                    <input
+                      type={showResetPin ? 'text' : 'password'}
+                      inputMode="numeric"
+                      maxLength={4}
+                      autoFocus
+                      value={resetPin}
+                      onChange={(e) => {
+                        const onlyNumbers = e.target.value.replace(/\D/g, '').slice(0, 4);
+                        setResetPin(onlyNumbers);
+                        setResetError('');
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && resetPin.length === 4) {
+                          e.preventDefault();
+                          void handleResetSales();
+                        }
+                      }}
+                      placeholder="••••"
+                      className="w-full text-center text-3xl tracking-[0.5em] font-bold border border-slate-300 rounded-xl px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-red-500"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => setShowResetPin((prev) => !prev)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                      title={showResetPin ? 'Ocultar PIN' : 'Mostrar PIN'}
+                    >
+                      {showResetPin ? <EyeOff size={19} /> : <Eye size={19} />}
+                    </button>
+                  </div>
+                </div>
+
+                {resetError && (
+                  <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-sm flex gap-2">
+                    <AlertTriangle size={17} className="shrink-0 mt-0.5" />
+                    <span>{resetError}</span>
+                  </div>
+                )}
+
+                <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs text-red-700">
+                  Al confirmar, la eliminación se ejecutará inmediatamente.
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    disabled={isResettingSales}
+                    onClick={() => {
+                      setResetError('');
+                      setResetPin('');
+                      setResetStep(1);
+                    }}
+                    className="py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50"
+                  >
+                    Volver
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleResetSales()}
+                    disabled={isResettingSales || resetPin.length !== 4}
+                    className="py-3 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isResettingSales ? (
+                      <Loader2 size={18} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={18} />
+                    )}
+                    {isResettingSales ? 'Reseteando...' : 'Confirmar reset definitivo'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {isModalOpen && (
         <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-4">
