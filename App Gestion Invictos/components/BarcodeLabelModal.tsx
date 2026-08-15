@@ -257,19 +257,16 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, widthPx, heightPx);
 
-        // QR grande a la izquierda + código corto debajo.
-        const qrPanelWidth = Math.min(
-          Math.round(widthPx * 0.34),
-          Math.round(heightPx * 1.18),
-        );
-
-        const separatorX = qrPanelWidth;
+        // Nuevo diseño:
+        // QR solo, lo más grande posible, usando casi toda la altura de la etiqueta.
+        // A la derecha van: código corto grande + nombre + color/talle.
+        const outerPad = Math.max(2, Math.round(heightPx * 0.04));
+        const qrPanelWidth = heightPx - outerPad * 2;
+        const separatorX = qrPanelWidth + outerPad * 2;
 
         /*
-         * Generamos un QR muy pequeño en contenido:
+         * Generamos un QR pequeño en contenido:
          * solo contiene el shortCode (ej. "1007").
-         * typeNumber=0 deja que la librería elija automáticamente
-         * la versión QR más chica posible.
          */
         const qr = window.qrcode(0, 'M');
         qr.addData(shortCode);
@@ -277,16 +274,14 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
         const moduleCount = qr.getModuleCount();
 
-        // Dejamos quiet zone de 4 módulos, importante para lectura confiable.
+        // Quiet zone estándar de 4 módulos.
         const quietModules = 4;
         const totalModules = moduleCount + quietModules * 2;
 
-        const availableQrPx = Math.min(
-          Math.round(heightPx * 0.72),
-          qrPanelWidth - 6,
-        );
+        // El QR usa casi todo el alto disponible de la etiqueta.
+        const availableQrPx = heightPx - outerPad * 2;
 
-        // Módulos enteros: evita que el QR salga borroso al imprimir.
+        // Módulos enteros para que no salga borroso.
         const moduleSize = Math.max(
           2,
           Math.floor(availableQrPx / totalModules),
@@ -294,8 +289,9 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
         const qrSize = totalModules * moduleSize;
 
-        const qrX = Math.round((qrPanelWidth - qrSize) / 2);
-        const qrY = 2;
+        // Centramos el QR dentro de un panel cuadrado a la izquierda.
+        const qrX = outerPad + Math.round((qrPanelWidth - qrSize) / 2);
+        const qrY = outerPad + Math.round((availableQrPx - qrSize) / 2);
 
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(qrX, qrY, qrSize, qrSize);
@@ -315,41 +311,38 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           }
         }
 
-        const codeFontSize = Math.max(12, Math.round(heightPx * 0.16));
-
-        ctx.fillStyle = '#000000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'bottom';
-        ctx.font = `900 ${codeFontSize}px Arial`;
-
-        ctx.fillText(
-          shortCode,
-          Math.round(qrPanelWidth / 2),
-          heightPx - 2,
-        );
-
+        // Separador
         ctx.strokeStyle = '#000000';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(separatorX, 0);
-        ctx.lineTo(separatorX, heightPx);
+        ctx.moveTo(separatorX, outerPad);
+        ctx.lineTo(separatorX, heightPx - outerPad);
         ctx.stroke();
 
-        // Descripción a la derecha.
-        const textX = separatorX + 8;
-        const textMaxWidth = widthPx - textX - 6;
-        const textTop = Math.max(8, Math.round(heightPx * 0.12));
+        // Bloque de texto a la derecha
+        const textX = separatorX + 6;
+        const textMaxWidth = widthPx - textX - 5;
+        const textTop = outerPad + 1;
 
+        const codeFont =
+          widthMm <= 40 ? 13 : widthMm >= 60 ? 18 : 15;
         const titleFont =
-          widthMm <= 40 ? 11 : widthMm >= 60 ? 15 : 13;
+          widthMm <= 40 ? 9 : widthMm >= 60 ? 13 : 11;
         const variantFont =
-          widthMm <= 40 ? 9 : widthMm >= 60 ? 12 : 10;
+          widthMm <= 40 ? 8 : widthMm >= 60 ? 11 : 9;
 
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
         ctx.fillStyle = '#000000';
-        ctx.font = `800 ${titleFont}px Arial`;
 
+        // Código corto grande arriba
+        ctx.font = `900 ${codeFont}px Arial`;
+        ctx.fillText(shortCode, textX, textTop);
+
+        let y = textTop + Math.round(codeFont * 1.02) + 1;
+
+        // Nombre del producto
+        ctx.font = `800 ${titleFont}px Arial`;
         const nameLines = wrapLines(
           ctx,
           product.name || '',
@@ -357,11 +350,9 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           2,
         );
 
-        let y = textTop;
-
         nameLines.forEach((line) => {
           ctx.fillText(line, textX, y);
-          y += Math.round(titleFont * 1.12);
+          y += Math.round(titleFont * 1.05);
         });
 
         const variant = [
@@ -372,12 +363,12 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           .join(' · ');
 
         if (variant) {
-          y += 3;
+          y += 1;
           ctx.font = `700 ${variantFont}px Arial`;
 
           wrapLines(ctx, variant, textMaxWidth, 2).forEach((line) => {
             ctx.fillText(line, textX, y);
-            y += Math.round(variantFont * 1.1);
+            y += Math.round(variantFont * 1.04);
           });
         }
 
@@ -636,7 +627,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
                   <div>
                     <div className="text-xs uppercase font-bold tracking-wide text-emerald-600">
-                      Código QR del producto
+                      Código QR grande del producto
                     </div>
 
                     <div className="flex items-center gap-2 mt-1">
@@ -647,7 +638,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                     </div>
 
                     <p className="text-xs text-emerald-700 mt-1">
-                      El QR contiene solamente este número corto. También podés escribirlo manualmente en Caja.
+                      El QR ocupa prácticamente toda la altura útil de la etiqueta. Contiene solamente este número corto, que también podés escribir manualmente en Caja.
                     </p>
                   </div>
                 </div>
