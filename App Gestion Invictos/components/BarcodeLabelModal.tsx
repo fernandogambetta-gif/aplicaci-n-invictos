@@ -2,22 +2,25 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   X,
   Loader2,
-  Barcode as BarcodeIcon,
   Download,
   Share2,
   Image as ImageIcon,
   Copy,
   Check,
+  QrCode,
+  Hash,
 } from 'lucide-react';
 import { Product } from '../types';
 
 declare global {
   interface Window {
-    JsBarcode?: (
-      element: SVGElement | HTMLCanvasElement,
-      value: string,
-      options?: Record<string, unknown>,
-    ) => void;
+    QRCode?: {
+      toCanvas: (
+        canvas: HTMLCanvasElement,
+        text: string,
+        options?: Record<string, unknown>,
+      ) => Promise<void>;
+    };
   }
 }
 
@@ -25,25 +28,22 @@ interface BarcodeLabelModalProps {
   open: boolean;
   product: Product | null;
   onClose: () => void;
-
-  // Si viene desde un ingreso de mercadería, permite elegir
-  // la cantidad sugerida de etiquetas a imprimir luego en NIIMBOT.
   stockEntryQuantity?: number;
 }
 
 type LabelSize = '40x15' | '50x15' | '60x15';
 type CopyMode = 'variant' | 'unit' | 'custom';
 
-const loadJsBarcode = (): Promise<void> => {
-  if (window.JsBarcode) return Promise.resolve();
+const loadQrCode = (): Promise<void> => {
+  if (window.QRCode?.toCanvas) return Promise.resolve();
 
   const existing = document.querySelector<HTMLScriptElement>(
-    'script[data-invictos-jsbarcode="true"]',
+    'script[data-invictos-qrcode="true"]',
   );
 
   if (existing) {
     return new Promise((resolve, reject) => {
-      if (window.JsBarcode) {
+      if (window.QRCode?.toCanvas) {
         resolve();
         return;
       }
@@ -51,12 +51,7 @@ const loadJsBarcode = (): Promise<void> => {
       existing.addEventListener('load', () => resolve(), { once: true });
       existing.addEventListener(
         'error',
-        () =>
-          reject(
-            new Error(
-              'No se pudo cargar el generador de códigos de barras.',
-            ),
-          ),
+        () => reject(new Error('No se pudo cargar el generador QR.')),
         { once: true },
       );
     });
@@ -65,16 +60,12 @@ const loadJsBarcode = (): Promise<void> => {
   return new Promise((resolve, reject) => {
     const script = document.createElement('script');
     script.src =
-      'https://cdn.jsdelivr.net/npm/jsbarcode@3.12.1/dist/JsBarcode.all.min.js';
+      'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js';
     script.async = true;
-    script.dataset.invictosJsbarcode = 'true';
+    script.dataset.invictosQrcode = 'true';
     script.onload = () => resolve();
     script.onerror = () =>
-      reject(
-        new Error(
-          'No se pudo cargar el generador de códigos de barras.',
-        ),
-      );
+      reject(new Error('No se pudo cargar el generador QR.'));
 
     document.head.appendChild(script);
   });
@@ -87,14 +78,6 @@ const sizeToMm = (size: LabelSize) => {
 
 const mmToPx = (mm: number, dpi = 203): number =>
   Math.max(1, Math.round((mm / 25.4) * dpi));
-
-const getBarcodeFormat = (
-  value: string,
-): 'EAN13' | 'EAN8' | 'CODE128' => {
-  if (/^\d{13}$/.test(value)) return 'EAN13';
-  if (/^\d{8}$/.test(value)) return 'EAN8';
-  return 'CODE128';
-};
 
 const sanitizeFileName = (value: string): string =>
   value
@@ -116,7 +99,7 @@ const buildLabelFileName = (
     product.name,
     product.color,
     product.size ? `t_${product.size}` : '',
-    product.barcode || product.code,
+    product.shortCode ? `qr_${product.shortCode}` : '',
     labelSize,
   ]
     .filter(Boolean)
@@ -140,38 +123,23 @@ const wrapLines = (
 
   for (const word of words) {
     const trial = current ? `${current} ${word}` : word;
-    const width = ctx.measureText(trial).width;
 
-    if (width <= maxWidth || !current) {
+    if (ctx.measureText(trial).width <= maxWidth || !current) {
       current = trial;
     } else {
       lines.push(current);
       current = word;
 
-      if (lines.length === maxLines - 1) {
-        break;
-      }
+      if (lines.length === maxLines - 1) break;
     }
   }
 
-  if (lines.length < maxLines && current) {
-    lines.push(current);
-  }
+  if (lines.length < maxLines && current) lines.push(current);
 
-  if (lines.length > maxLines) {
-    lines.length = maxLines;
-  }
-
-  if (
-    words.length > 0 &&
-    lines.length === maxLines &&
-    lines.join(' ') !== clean
-  ) {
+  if (lines.length === maxLines && lines.join(' ') !== clean) {
     const last = lines[maxLines - 1];
-    if (!last.endsWith('…')) {
-      lines[maxLines - 1] =
-        last.length > 1 ? `${last.slice(0, -1)}…` : `${last}…`;
-    }
+    lines[maxLines - 1] =
+      last.length > 1 ? `${last.slice(0, -1)}…` : `${last}…`;
   }
 
   return lines;
@@ -194,30 +162,17 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 }) => {
   const [copies, setCopies] = useState(1);
   const [copyMode, setCopyMode] = useState<CopyMode>('custom');
-  const [labelSize, setLabelSize] =
-    useState<LabelSize>('50x15');
-  const [isLoading, setIsLoading] =
-    useState(false);
+  const [labelSize, setLabelSize] = useState<LabelSize>('50x15');
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [isSharing, setIsSharing] = useState(false);
   const [copiedName, setCopiedName] = useState(false);
 
-  const barcodeValue = (
-    product?.barcode ||
-    product?.code ||
-    ''
-  ).trim();
-
-  const barcodeFormat =
-    getBarcodeFormat(barcodeValue);
+  const shortCode = (product?.shortCode || '').trim();
 
   const suggestedCopies = useMemo(
-    () =>
-      Math.max(
-        1,
-        Math.min(100, Number(copies) || 1),
-      ),
+    () => Math.max(1, Math.min(100, Number(copies) || 1)),
     [copies],
   );
 
@@ -229,10 +184,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   useEffect(() => {
     if (!open) return;
 
-    const entryQty = Math.max(
-      0,
-      Number(stockEntryQuantity || 0),
-    );
+    const entryQty = Math.max(0, Number(stockEntryQuantity || 0));
 
     if (entryQty > 0) {
       setCopyMode('unit');
@@ -249,7 +201,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   }, [open, product?.id, stockEntryQuantity]);
 
   useEffect(() => {
-    if (!open || !product || !barcodeValue) return;
+    if (!open || !product || !shortCode) return;
 
     let cancelled = false;
 
@@ -258,202 +210,136 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
       setIsLoading(true);
 
       try {
-        await loadJsBarcode();
+        await loadQrCode();
 
-        if (!window.JsBarcode) {
-          throw new Error(
-            'No se pudo inicializar el generador de códigos de barras.',
-          );
+        if (!window.QRCode?.toCanvas) {
+          throw new Error('No se pudo inicializar el generador QR.');
         }
 
-        const { width: widthMm, height: heightMm } =
-          sizeToMm(labelSize);
-
+        const { width: widthMm, height: heightMm } = sizeToMm(labelSize);
         const dpi = 203;
         const widthPx = mmToPx(widthMm, dpi);
         const heightPx = mmToPx(heightMm, dpi);
 
-        const canvas =
-          document.createElement('canvas');
+        const canvas = document.createElement('canvas');
         canvas.width = widthPx;
         canvas.height = heightPx;
 
         const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('No se pudo crear la imagen PNG.');
 
-        if (!ctx) {
-          throw new Error(
-            'No se pudo crear la imagen PNG.',
-          );
-        }
-
-        // Fondo
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, widthPx, heightPx);
 
-        const barcodeZoneWidth = Math.round(
-          widthPx * (widthMm <= 40 ? 0.70 : 0.68),
+        // QR grande a la izquierda + código corto debajo.
+        const qrPanelWidth = Math.min(
+          Math.round(widthPx * 0.34),
+          Math.round(heightPx * 1.18),
         );
-        const descriptionZoneX = barcodeZoneWidth + 1;
-        const descriptionZoneWidth =
-          widthPx - descriptionZoneX - 1;
 
-        // Canvas temporal para barcode
-        const barcodeCanvas =
-          document.createElement('canvas');
+        const separatorX = qrPanelWidth;
+        const qrSize = Math.min(
+          Math.round(heightPx * 0.72),
+          qrPanelWidth - 8,
+        );
 
-        window.JsBarcode(
-          barcodeCanvas,
-          barcodeValue,
-          {
-            format: barcodeFormat,
-            displayValue: true,
-            font: 'Arial',
-            fontOptions: 'bold',
-            fontSize:
-              barcodeFormat === 'CODE128'
-                ? 12
-                : 13,
-            textMargin: 2,
-            height:
-              barcodeFormat === 'CODE128'
-                ? Math.max(
-                    32,
-                    Math.round(heightPx * 0.48),
-                  )
-                : Math.max(
-                    34,
-                    Math.round(heightPx * 0.52),
-                  ),
-            width:
-              barcodeFormat === 'CODE128'
-                ? 1.6
-                : 1.35,
-            margin: 4,
-            background: '#ffffff',
-            lineColor: '#000000',
+        const qrCanvas = document.createElement('canvas');
+
+        await window.QRCode.toCanvas(qrCanvas, shortCode, {
+          errorCorrectionLevel: 'M',
+          margin: 1,
+          width: qrSize,
+          color: {
+            dark: '#000000',
+            light: '#ffffff',
           },
+        });
+
+        const qrX = Math.round((qrPanelWidth - qrSize) / 2);
+        const qrY = 2;
+
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(qrCanvas, qrX, qrY, qrSize, qrSize);
+
+        const codeFontSize = Math.max(12, Math.round(heightPx * 0.16));
+
+        ctx.fillStyle = '#000000';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.font = `900 ${codeFontSize}px Arial`;
+
+        ctx.fillText(
+          shortCode,
+          Math.round(qrPanelWidth / 2),
+          heightPx - 2,
         );
 
-        // Dibujo del barcode
-        const padX = Math.max(4, Math.round(widthPx * 0.01));
-        const padY = Math.max(4, Math.round(heightPx * 0.04));
-
-        const targetW = barcodeZoneWidth - padX * 2;
-        const targetH = heightPx - padY * 2;
-
-        const barcodeAspect =
-          barcodeCanvas.width / barcodeCanvas.height;
-
-        let drawW = targetW;
-        let drawH = drawW / barcodeAspect;
-
-        if (drawH > targetH) {
-          drawH = targetH;
-          drawW = drawH * barcodeAspect;
-        }
-
-        const drawX =
-          Math.round((barcodeZoneWidth - drawW) / 2);
-        const drawY =
-          Math.round((heightPx - drawH) / 2);
-
-        ctx.drawImage(
-          barcodeCanvas,
-          drawX,
-          drawY,
-          drawW,
-          drawH,
-        );
-
-        // Separador vertical
         ctx.strokeStyle = '#000000';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(barcodeZoneWidth, 0);
-        ctx.lineTo(barcodeZoneWidth, heightPx);
+        ctx.moveTo(separatorX, 0);
+        ctx.lineTo(separatorX, heightPx);
         ctx.stroke();
 
-        // Texto a la derecha
-        const textPadX = Math.max(
-          7,
-          Math.round(widthPx * 0.018),
-        );
-        const textPadY = Math.max(
-          10,
-          Math.round(heightPx * 0.1),
-        );
-        const textX = descriptionZoneX + textPadX;
-        const textMaxWidth =
-          descriptionZoneWidth - textPadX * 2;
+        // Descripción a la derecha.
+        const textX = separatorX + 8;
+        const textMaxWidth = widthPx - textX - 6;
+        const textTop = Math.max(8, Math.round(heightPx * 0.12));
 
-        const variant = [
-          product.color,
-          product.size
-            ? `T. ${product.size}`
-            : '',
-        ]
-          .filter(Boolean)
-          .join(' · ');
+        const titleFont =
+          widthMm <= 40 ? 11 : widthMm >= 60 ? 15 : 13;
+        const variantFont =
+          widthMm <= 40 ? 9 : widthMm >= 60 ? 12 : 10;
 
-        const titleFontSize =
-          widthMm <= 40 ? 11 : widthMm >= 60 ? 14 : 12;
-        const variantFontSize =
-          widthMm <= 40 ? 9 : widthMm >= 60 ? 11 : 10;
-
-        ctx.fillStyle = '#000000';
+        ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
+        ctx.fillStyle = '#000000';
+        ctx.font = `800 ${titleFont}px Arial`;
 
-        ctx.font = `700 ${titleFontSize}px Arial`;
         const nameLines = wrapLines(
           ctx,
           product.name || '',
           textMaxWidth,
-          variant ? 2 : 3,
+          2,
         );
 
-        let cursorY = textPadY;
+        let y = textTop;
 
         nameLines.forEach((line) => {
-          ctx.fillText(line, textX, cursorY);
-          cursorY += Math.round(titleFontSize * 1.1);
+          ctx.fillText(line, textX, y);
+          y += Math.round(titleFont * 1.12);
         });
 
-        if (variant) {
-          cursorY += 2;
-          ctx.font = `700 ${variantFontSize}px Arial`;
-          const variantLines = wrapLines(
-            ctx,
-            variant,
-            textMaxWidth,
-            2,
-          );
+        const variant = [
+          product.color,
+          product.size ? `T. ${product.size}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
 
-          variantLines.forEach((line) => {
-            ctx.fillText(line, textX, cursorY);
-            cursorY += Math.round(
-              variantFontSize * 1.08,
-            );
+        if (variant) {
+          y += 3;
+          ctx.font = `700 ${variantFont}px Arial`;
+
+          wrapLines(ctx, variant, textMaxWidth, 2).forEach((line) => {
+            ctx.fillText(line, textX, y);
+            y += Math.round(variantFont * 1.1);
           });
         }
 
         const url = canvas.toDataURL('image/png');
 
-        if (!cancelled) {
-          setPreviewUrl(url);
-        }
+        if (!cancelled) setPreviewUrl(url);
       } catch (e: any) {
         console.error(e);
 
         if (!cancelled) {
           setError(
-            e?.message ||
-              'No se pudo generar la imagen PNG de la etiqueta.',
+            e?.message || 'No se pudo generar la etiqueta QR.',
           );
         }
       } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
+        if (!cancelled) setIsLoading(false);
       }
     };
 
@@ -462,21 +348,13 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [
-    open,
-    product,
-    barcodeValue,
-    barcodeFormat,
-    labelSize,
-  ]);
+  }, [open, product, shortCode, labelSize]);
 
   if (!open || !product) return null;
 
   const handleDownload = () => {
     if (!previewUrl) {
-      setError(
-        'La imagen todavía se está generando. Esperá un momento e intentá nuevamente.',
-      );
+      setError('La imagen todavía se está generando.');
       return;
     }
 
@@ -489,16 +367,11 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   const handleShare = async () => {
     try {
       if (!previewUrl) {
-        setError(
-          'La imagen todavía se está generando. Esperá un momento e intentá nuevamente.',
-        );
+        setError('La imagen todavía se está generando.');
         return;
       }
 
-      if (
-        !navigator.share ||
-        typeof navigator.canShare !== 'function'
-      ) {
+      if (!navigator.share || typeof navigator.canShare !== 'function') {
         setError(
           'Este dispositivo no admite compartir archivos directamente.',
         );
@@ -507,31 +380,22 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
       setIsSharing(true);
 
-      const file = await dataUrlToFile(
-        previewUrl,
-        fileName,
-      );
+      const file = await dataUrlToFile(previewUrl, fileName);
 
       if (!navigator.canShare({ files: [file] })) {
-        setError(
-          'Este dispositivo no permite compartir este archivo PNG.',
-        );
+        setError('Este dispositivo no permite compartir este PNG.');
         return;
       }
 
       await navigator.share({
         title: `Etiqueta ${product.name}`,
-        text:
-          'Etiqueta PNG generada desde INVICTOS para imprimir en NIIMBOT.',
+        text: `Etiqueta QR INVICTOS · Código ${shortCode}`,
         files: [file],
       });
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
         console.error(e);
-        setError(
-          e?.message ||
-            'No se pudo compartir la imagen PNG.',
-        );
+        setError(e?.message || 'No se pudo compartir la etiqueta.');
       }
     } finally {
       setIsSharing(false);
@@ -549,14 +413,14 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-[10020] flex items-center justify-center p-4">
+    <div className="fixed inset-0 bg-black/50 z-[10020] flex items-center justify-center p-3 sm:p-4">
       <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full max-h-[94vh] overflow-hidden flex flex-col">
         <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-start gap-4 shrink-0">
           <div>
-            <div className="text-xs uppercase tracking-wide font-semibold text-indigo-600">
+            <div className="text-xs uppercase tracking-wide font-semibold text-emerald-600">
               {stockEntryQuantity
-                ? 'Etiquetas del ingreso · PNG para NIIMBOT'
-                : 'Etiqueta de producto · PNG para NIIMBOT'}
+                ? 'Etiquetas del ingreso · QR para NIIMBOT'
+                : 'Etiqueta de producto · QR para NIIMBOT'}
             </div>
 
             <h3 className="text-lg font-bold text-slate-900 mt-1">
@@ -573,10 +437,10 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           </button>
         </div>
 
-        <div className="p-4 sm:p-5 space-y-4 overflow-y-auto overscroll-contain flex-1 min-h-0 pb-28 sm:pb-5">
-          {!barcodeValue ? (
+        <div className="p-4 sm:p-5 space-y-4 overflow-y-auto overscroll-contain flex-1 min-h-0">
+          {!shortCode ? (
             <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
-              Este producto no tiene código de barras ni SKU para generar la etiqueta.
+              Este producto todavía no tiene código corto. Cerrá esta ventana y actualizá Inventario para que INVICTOS lo genere automáticamente.
             </div>
           ) : (
             <>
@@ -586,6 +450,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                     <div className="font-bold text-slate-800">
                       Cantidad sugerida de etiquetas
                     </div>
+
                     <p className="text-xs text-slate-500 mt-1">
                       Ingreso registrado: {Number(stockEntryQuantity)} unidad(es) de esta variante.
                     </p>
@@ -598,18 +463,14 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                         setCopyMode('variant');
                         setCopies(1);
                       }}
-                      className={`p-3 rounded-xl border text-left transition-colors ${
+                      className={`p-3 rounded-xl border text-left ${
                         copyMode === 'variant'
                           ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300'
+                          : 'bg-white text-slate-700 border-slate-200'
                       }`}
                     >
                       <div className="font-bold text-sm">Una por variante</div>
-                      <div className={`text-[11px] mt-1 ${
-                        copyMode === 'variant' ? 'text-indigo-100' : 'text-slate-400'
-                      }`}>
-                        1 etiqueta
-                      </div>
+                      <div className="text-[11px] mt-1">1 etiqueta</div>
                     </button>
 
                     <button
@@ -618,16 +479,14 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                         setCopyMode('unit');
                         setCopies(Math.max(1, Number(stockEntryQuantity)));
                       }}
-                      className={`p-3 rounded-xl border text-left transition-colors ${
+                      className={`p-3 rounded-xl border text-left ${
                         copyMode === 'unit'
                           ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300'
+                          : 'bg-white text-slate-700 border-slate-200'
                       }`}
                     >
                       <div className="font-bold text-sm">Una por unidad</div>
-                      <div className={`text-[11px] mt-1 ${
-                        copyMode === 'unit' ? 'text-indigo-100' : 'text-slate-400'
-                      }`}>
+                      <div className="text-[11px] mt-1">
                         {Number(stockEntryQuantity)} etiqueta(s)
                       </div>
                     </button>
@@ -638,40 +497,30 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                         setCopyMode('custom');
                         setCopies(1);
                       }}
-                      className={`p-3 rounded-xl border text-left transition-colors ${
+                      className={`p-3 rounded-xl border text-left ${
                         copyMode === 'custom'
                           ? 'bg-indigo-600 text-white border-indigo-600'
-                          : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300'
+                          : 'bg-white text-slate-700 border-slate-200'
                       }`}
                     >
                       <div className="font-bold text-sm">Cantidad manual</div>
-                      <div className={`text-[11px] mt-1 ${
-                        copyMode === 'custom' ? 'text-indigo-100' : 'text-slate-400'
-                      }`}>
-                        Elegir cantidad
-                      </div>
+                      <div className="text-[11px] mt-1">Elegir cantidad</div>
                     </button>
                   </div>
                 </div>
               )}
 
-              {/* PREVISUALIZACION */}
               <div className="bg-slate-100 rounded-xl p-5 overflow-x-auto">
                 <div className="flex items-center justify-center min-h-[120px]">
                   {isLoading ? (
                     <div className="flex flex-col items-center gap-2 text-slate-500">
-                      <Loader2
-                        size={24}
-                        className="animate-spin"
-                      />
-                      <span className="text-sm">
-                        Generando PNG...
-                      </span>
+                      <Loader2 size={24} className="animate-spin" />
+                      <span className="text-sm">Generando QR...</span>
                     </div>
                   ) : previewUrl ? (
                     <img
                       src={previewUrl}
-                      alt={`Etiqueta ${product.name}`}
+                      alt={`Etiqueta QR ${product.name}`}
                       className="bg-white border border-slate-300 shadow-sm max-w-full h-auto"
                       style={{
                         width:
@@ -682,11 +531,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                             : 380,
                       }}
                     />
-                  ) : (
-                    <div className="text-slate-400 text-sm">
-                      No se pudo generar la previsualización.
-                    </div>
-                  )}
+                  ) : null}
                 </div>
               </div>
 
@@ -698,23 +543,12 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
                   <select
                     value={labelSize}
-                    onChange={(e) =>
-                      setLabelSize(
-                        e.target
-                          .value as LabelSize,
-                      )
-                    }
+                    onChange={(e) => setLabelSize(e.target.value as LabelSize)}
                     className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
                   >
-                    <option value="40x15">
-                      40 × 15 mm
-                    </option>
-                    <option value="50x15">
-                      50 × 15 mm
-                    </option>
-                    <option value="60x15">
-                      60 × 15 mm
-                    </option>
+                    <option value="40x15">40 × 15 mm</option>
+                    <option value="50x15">50 × 15 mm</option>
+                    <option value="60x15">60 × 15 mm</option>
                   </select>
                 </div>
 
@@ -733,13 +567,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                       setCopies(
                         Math.max(
                           1,
-                          Math.min(
-                            100,
-                            parseInt(
-                              e.target.value,
-                              10,
-                            ) || 1,
-                          ),
+                          Math.min(100, parseInt(e.target.value, 10) || 1),
                         ),
                       );
                     }}
@@ -748,43 +576,35 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                 </div>
               </div>
 
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-600 flex gap-2">
-                <BarcodeIcon
-                  size={16}
-                  className="shrink-0 mt-0.5"
-                />
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+                <div className="flex items-start gap-3">
+                  <QrCode size={22} className="text-emerald-700 shrink-0" />
 
-                <div>
                   <div>
-                    Formato:{' '}
-                    <strong>
-                      {barcodeFormat}
-                    </strong>
-                  </div>
+                    <div className="text-xs uppercase font-bold tracking-wide text-emerald-600">
+                      Código QR del producto
+                    </div>
 
-                  <div className="mt-1">
-                    Código:{' '}
-                    <strong className="font-mono text-sm text-slate-900">
-                      {barcodeValue}
-                    </strong>
-                  </div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <Hash size={17} className="text-emerald-700" />
+                      <span className="font-mono text-2xl font-black text-emerald-800">
+                        {shortCode}
+                      </span>
+                    </div>
 
-                  <div className="mt-1">
-                    Cantidad sugerida para imprimir en NIIMBOT:{' '}
-                    <strong className="text-slate-900">
-                      {suggestedCopies}
-                    </strong>
+                    <p className="text-xs text-emerald-700 mt-1">
+                      El QR contiene solamente este número corto. También podés escribirlo manualmente en Caja.
+                    </p>
                   </div>
                 </div>
               </div>
 
               <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-xs text-indigo-800 flex gap-2">
-                <ImageIcon
-                  size={16}
-                  className="shrink-0 mt-0.5"
-                />
+                <ImageIcon size={16} className="shrink-0 mt-0.5" />
+
                 <div>
-                  Este archivo se descarga como <strong>PNG</strong>. En el celular podés usar <strong>Compartir / Guardar</strong> para mandarlo a Archivos, Drive, WhatsApp u otra app, y luego abrirlo/importarlo en NIIMBOT.
+                  Descargá o compartí este PNG desde el celular y luego importalo en NIIMBOT.
+                  Cantidad sugerida: <strong>{suggestedCopies}</strong>.
                 </div>
               </div>
 
@@ -816,10 +636,8 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
               {error}
             </div>
           )}
-
         </div>
 
-        {/* BARRA DE ACCIONES SIEMPRE VISIBLE */}
         <div className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4 shadow-[0_-8px_20px_rgba(15,23,42,0.08)]">
           <div className="grid grid-cols-1 sm:flex sm:justify-end gap-2">
             {typeof navigator !== 'undefined' &&
@@ -827,8 +645,8 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                 <button
                   type="button"
                   onClick={() => void handleShare()}
-                  disabled={!barcodeValue || isLoading || !previewUrl || isSharing}
-                  className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!shortCode || isLoading || !previewUrl || isSharing}
+                  className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {isSharing ? (
                     <Loader2 size={18} className="animate-spin" />
@@ -842,8 +660,8 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
             <button
               type="button"
               onClick={handleDownload}
-              disabled={!barcodeValue || isLoading || !previewUrl}
-              className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={!shortCode || isLoading || !previewUrl}
+              className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Download size={18} />
               Descargar PNG
