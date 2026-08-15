@@ -21,6 +21,7 @@ import {
   where,
   limit,
   runTransaction,
+  writeBatch,
 } from 'firebase/firestore';
 
 import { db } from './firebase';
@@ -477,6 +478,129 @@ export const StorageService = {
         }),
       ),
     );
+  },
+
+  /**
+   * RESET ADMINISTRATIVO DE VENTAS / HISTORIAL
+   *
+   * Seguridad funcional:
+   * - solo acepta un usuario con rol admin;
+   * - exige reingresar el PIN actual del administrador.
+   *
+   * Efectos:
+   * - elimina TODAS las ventas;
+   * - por lo tanto también queda vacío el Historial de Ventas;
+   * - devuelve al stock las cantidades descontadas por esas ventas;
+   * - no elimina productos, usuarios, categorías ni proveedores.
+   *
+   * Se limita a un batch seguro para evitar un reseteo parcial.
+   */
+  resetSalesAndRestoreStock: async (
+    adminUser: User,
+    confirmationPin: string,
+  ): Promise<{
+    salesDeleted: number;
+    unitsRestored: number;
+    productsAdjusted: number;
+    missingProducts: number;
+  }> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    if (!adminUser || adminUser.role !== 'admin') {
+      throw new Error('Acceso denegado. Solo un administrador puede resetear ventas.');
+    }
+
+    if ((confirmationPin || '').trim() !== (adminUser.pin || '').trim()) {
+      throw new Error('PIN de administrador incorrecto.');
+    }
+
+    const [salesSnap, productsSnap] = await Promise.all([
+      getDocs(collection(db, COLLECTIONS.SALES)),
+      getDocs(collection(db, COLLECTIONS.PRODUCTS)),
+    ]);
+
+    if (salesSnap.empty) {
+      return {
+        salesDeleted: 0,
+        unitsRestored: 0,
+        productsAdjusted: 0,
+        missingProducts: 0,
+      };
+    }
+
+    const existingProductIds = new Set(
+      productsSnap.docs.map((productDoc) => productDoc.id),
+    );
+
+    // Agrupa todas las unidades a devolver por producto.
+    const restoreByProduct = new Map<string, number>();
+
+    salesSnap.docs.forEach((saleDoc) => {
+      const sale = saleDoc.data() as Sale;
+
+      (sale.items || []).forEach((item) => {
+        const quantity = Number(item.quantity);
+
+        if (
+          !item.productId ||
+          !Number.isFinite(quantity) ||
+          quantity <= 0
+        ) {
+          return;
+        }
+
+        restoreByProduct.set(
+          item.productId,
+          (restoreByProduct.get(item.productId) || 0) + quantity,
+        );
+      });
+    });
+
+    const validRestores = Array.from(restoreByProduct.entries()).filter(
+      ([productId]) => existingProductIds.has(productId),
+    );
+
+    const missingProducts = Array.from(restoreByProduct.keys()).filter(
+      (productId) => !existingProductIds.has(productId),
+    ).length;
+
+    // Firestore tiene límite de escrituras por batch.
+    // Usamos margen para garantizar que, si es demasiado grande,
+    // NO se haga ningún cambio parcial.
+    const totalOperations = salesSnap.size + validRestores.length;
+
+    if (totalOperations > 450) {
+      throw new Error(
+        `El reseteo requiere ${totalOperations} operaciones y supera el límite seguro. ` +
+          'No se realizó ningún cambio. Se deberá hacer un reseteo administrativo por lotes.',
+      );
+    }
+
+    const batch = writeBatch(db);
+    const now = Date.now();
+    let unitsRestored = 0;
+
+    validRestores.forEach(([productId, quantity]) => {
+      unitsRestored += quantity;
+
+      batch.update(doc(db, COLLECTIONS.PRODUCTS, productId), {
+        stock: increment(quantity),
+        updatedAt: now,
+      });
+    });
+
+    salesSnap.docs.forEach((saleDoc) => {
+      batch.delete(saleDoc.ref);
+    });
+
+    await batch.commit();
+
+    return {
+      salesDeleted: salesSnap.size,
+      unitsRestored,
+      productsAdjusted: validRestores.length,
+      missingProducts,
+    };
   },
 
   // ================= EXPORT =================
