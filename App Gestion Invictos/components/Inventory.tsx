@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Product, CategoryItem, ProviderItem } from '../types';
 import {
@@ -46,6 +46,8 @@ const Portal: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 };
 
 const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
+  const shortCodeMigrationStarted = useRef(false);
+
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -57,6 +59,8 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
   const [scanError, setScanError] = useState('');
   const [labelProduct, setLabelProduct] = useState<Product | null>(null);
+  const [labelStockEntryQuantity, setLabelStockEntryQuantity] = useState<number | undefined>(undefined);
+  const [generateRestockLabels, setGenerateRestockLabels] = useState(false);
   const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -118,6 +122,31 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     void loadLists();
   }, [loadLists]);
 
+  // Completa automáticamente códigos cortos en productos anteriores.
+  useEffect(() => {
+    if (
+      shortCodeMigrationStarted.current ||
+      products.length === 0 ||
+      !products.some((product) => !(product.shortCode || '').trim())
+    ) {
+      return;
+    }
+
+    shortCodeMigrationStarted.current = true;
+
+    void (async () => {
+      try {
+        const updated = await StorageService.ensureProductShortCodes();
+
+        if (updated > 0) {
+          await Promise.resolve(onUpdate());
+        }
+      } catch (error) {
+        console.error('No se pudieron completar los códigos cortos:', error);
+      }
+    })();
+  }, [products, onUpdate]);
+
   // ===============================
   // Helpers de identificación
   // ===============================
@@ -129,6 +158,25 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       0,
     );
     return (10 - (sum % 10)) % 10;
+  };
+
+  /**
+   * Genera un código corto único para QR y búsqueda manual.
+   */
+  const generateShortCode = (): string => {
+    const existing = new Set(
+      products
+        .map((p) => (p.shortCode || '').trim())
+        .filter(Boolean),
+    );
+
+    let candidate = 1000;
+
+    while (existing.has(String(candidate))) {
+      candidate += 1;
+    }
+
+    return String(candidate);
   };
 
   /**
@@ -176,6 +224,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const buildEmptyForm = (): Partial<Product> => ({
     name: '',
     code: generateSku(),
+    shortCode: generateShortCode(),
     barcode: generateInternalBarcode(),
     category: categories.length > 0 ? categories[0].name : '',
     provider: providers.length > 0 ? providers[0].name : '',
@@ -196,6 +245,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     setFormData({
       name: '',
       code: '',
+      shortCode: '',
       barcode: '',
       category: categories.length > 0 ? categories[0].name : '',
       provider: providers.length > 0 ? providers[0].name : '',
@@ -227,6 +277,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const handleSave = async () => {
     const name = (formData.name || '').trim();
     const code = (formData.code || '').trim();
+    const shortCode = (formData.shortCode || '').replace(/\D/g, '').trim();
     const barcodeValue = (formData.barcode || '').trim();
     const category = formData.category || '';
     const provider = formData.provider || '';
@@ -245,6 +296,11 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
     if (!code) {
       setFormError('El producto debe tener un código / SKU.');
+      return;
+    }
+
+    if (!/^\d{4,6}$/.test(shortCode)) {
+      setFormError('El código corto / QR debe tener entre 4 y 6 números.');
       return;
     }
 
@@ -284,6 +340,19 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       return;
     }
 
+    const duplicateShortCode = products.find(
+      (p) =>
+        p.id !== formData.id &&
+        (p.shortCode || '').trim() === shortCode,
+    );
+
+    if (duplicateShortCode) {
+      setFormError(
+        `El código corto "${shortCode}" ya está usado por "${duplicateShortCode.name}".`,
+      );
+      return;
+    }
+
     const duplicateBarcode = products.find(
       (p) =>
         p.id !== formData.id &&
@@ -313,6 +382,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       const newProduct: Product = {
         id: formData.id || Date.now().toString(),
         code,
+        shortCode,
         barcode: barcodeValue,
         parentProductId: formData.parentProductId,
         name,
@@ -358,6 +428,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     setFormData({
       ...product,
       minStock: product.minStock ?? 3,
+      shortCode: product.shortCode || generateShortCode(),
       barcode: product.barcode || '',
       size: product.size || '',
       color: product.color || '',
@@ -367,6 +438,21 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     setIsModalOpen(true);
   };
 
+  const openProductLabel = (product: Product) => {
+    setLabelStockEntryQuantity(undefined);
+    setLabelProduct(product);
+  };
+
+  const openStockEntryLabels = (product: Product, quantity: number) => {
+    setLabelStockEntryQuantity(Math.max(1, quantity));
+    setLabelProduct(product);
+  };
+
+  const closeLabelModal = () => {
+    setLabelProduct(null);
+    setLabelStockEntryQuantity(undefined);
+  };
+
   // ===============================
   // Restock
   // ===============================
@@ -374,6 +460,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const handleOpenRestock = (product?: Product) => {
     setRestockSearch('');
     setRestockQuantity(0);
+    setGenerateRestockLabels(false);
 
     if (product) {
       setRestockProductId(product.id);
@@ -393,18 +480,27 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
     try {
       const product = products.find((p) => p.id === restockProductId);
+      const enteredQuantity = restockQuantity;
+      const shouldGenerateLabels = generateRestockLabels;
 
       if (product) {
         if (restockNewCost > 0 && restockNewCost !== product.cost) {
           await StorageService.updateProductCost(product.id, restockNewCost);
         }
 
-        await StorageService.updateStock(product.id, restockQuantity);
+        await StorageService.updateStock(product.id, enteredQuantity);
       }
 
       await Promise.resolve(onUpdate());
+
       setIsRestockModalOpen(false);
       setRestockQuantity(0);
+      setGenerateRestockLabels(false);
+
+      // Solo después de que el ingreso quedó guardado se ofrecen las etiquetas.
+      if (product && shouldGenerateLabels) {
+        openStockEntryLabels(product, enteredQuantity);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -452,6 +548,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     const searchable = [
       p.name,
       p.code,
+      p.shortCode,
       p.barcode,
       p.provider,
       p.category,
@@ -480,6 +577,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     return (
       (p.name || '').toLowerCase().includes(term) ||
       (p.code || '').toLowerCase().includes(term) ||
+      (p.shortCode || '').toLowerCase().includes(term) ||
       (p.barcode || '').toLowerCase().includes(term) ||
       (p.size || '').toLowerCase().includes(term) ||
       (p.color || '').toLowerCase().includes(term)
@@ -507,6 +605,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
     let product = products.find(
       (p) =>
+        (p.shortCode || '').trim() === code ||
         (p.barcode || '').trim() === code ||
         (p.code || '').trim().toLowerCase() === code.toLowerCase(),
     );
@@ -745,6 +844,11 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                       <div className="text-xs font-mono text-slate-700">
                         {product.code || 'S/C'}
                       </div>
+
+                      <div className="mt-1 inline-flex items-center gap-1.5 px-2 py-1 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold font-mono">
+                        QR {product.shortCode || 'pendiente'}
+                      </div>
+
                       <div className="text-[11px] font-mono text-slate-400 mt-1 flex items-center gap-1">
                         <Barcode size={12} />
                         {product.barcode || 'Sin código de barras'}
@@ -842,7 +946,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                         <button
                           type="button"
-                          onClick={() => setLabelProduct(product)}
+                          onClick={() => openProductLabel(product)}
                           title="Imprimir etiqueta"
                           className="text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors p-2 rounded-lg"
                         >
@@ -903,7 +1007,8 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       <BarcodeLabelModal
         open={Boolean(labelProduct)}
         product={labelProduct}
-        onClose={() => setLabelProduct(null)}
+        stockEntryQuantity={labelStockEntryQuantity}
+        onClose={closeLabelModal}
       />
 
       {scannedProduct && (
@@ -941,6 +1046,12 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     <span className="font-mono text-slate-800 text-right">{scannedProduct.code}</span>
                   </div>
                   <div className="flex justify-between gap-4 p-3">
+                    <span className="text-slate-500">Código corto / QR</span>
+                    <span className="font-mono font-bold text-emerald-700 text-right">
+                      {scannedProduct.shortCode || 'Pendiente'}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-4 p-3">
                     <span className="text-slate-500">Código de barras</span>
                     <span className="font-mono text-slate-800 text-right">{scannedProduct.barcode || 'Sin código'}</span>
                   </div>
@@ -964,7 +1075,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     onClick={() => {
                       const product = scannedProduct;
                       setScannedProduct(null);
-                      setLabelProduct(product);
+                      openProductLabel(product);
                     }}
                     className="py-3 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2"
                   >
@@ -1054,7 +1165,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                     <input
                       type="text"
-                      placeholder="Filtrar por nombre, SKU, barcode, talle o color..."
+                      placeholder="Filtrar por nombre, código corto QR, SKU, barcode, talle o color..."
                       className="text-xs border-b border-slate-200 focus:border-indigo-500 focus:outline-none w-full py-1"
                       value={restockSearch}
                       onChange={(e) => setRestockSearch(e.target.value)}
@@ -1173,6 +1284,59 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                 <button
                   type="button"
+                  onClick={() =>
+                    setGenerateRestockLabels((prev) => !prev)
+                  }
+                  disabled={
+                    !selectedProductForRestock ||
+                    restockQuantity <= 0 ||
+                    isSaving
+                  }
+                  className={`w-full p-3 rounded-xl border text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                    generateRestockLabels
+                      ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
+                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    <div
+                      className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+                        generateRestockLabels
+                          ? 'bg-indigo-600 text-white'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      <Printer size={18} />
+                    </div>
+
+                    <div className="flex-1">
+                      <div className="font-bold">
+                        Generar etiquetas del ingreso
+                      </div>
+
+                      <div className="text-xs opacity-75 mt-0.5">
+                        {generateRestockLabels
+                          ? 'Activado: al confirmar el ingreso se abrirá la selección de etiquetas.'
+                          : 'Opcional: activalo si querés imprimir etiquetas después de guardar el ingreso.'}
+                      </div>
+                    </div>
+
+                    <div
+                      className={`w-5 h-5 rounded-full border flex items-center justify-center mt-1 ${
+                        generateRestockLabels
+                          ? 'bg-indigo-600 border-indigo-600'
+                          : 'bg-white border-slate-300'
+                      }`}
+                    >
+                      {generateRestockLabels && (
+                        <span className="text-white text-xs">✓</span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleSubmitRestock}
                   disabled={
                     !selectedProductForRestock ||
@@ -1205,7 +1369,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     {formData.id ? 'Editar Producto' : 'Nuevo Producto'}
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Cada combinación de talle/color debe tener su propio SKU y código de barras.
+                    Cada variante tiene SKU, código corto QR y código de barras propio.
                   </p>
                 </div>
 
@@ -1233,7 +1397,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     Identificación
                   </h4>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">
                         Código / SKU
@@ -1270,6 +1434,40 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
                       <p className="text-[11px] text-slate-400 mt-1">
                         Identificador interno del producto.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">
+                        Código corto / QR
+                      </label>
+
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          readOnly
+                          className="flex-1 min-w-0 border border-emerald-300 bg-emerald-50 rounded-lg p-2 font-mono font-bold text-emerald-800"
+                          value={formData.shortCode || ''}
+                        />
+
+                        <button
+                          type="button"
+                          title="Generar otro código corto"
+                          onClick={() =>
+                            setFormData({
+                              ...formData,
+                              shortCode: generateShortCode(),
+                            })
+                          }
+                          className="px-3 border border-emerald-300 rounded-lg hover:bg-emerald-50 text-emerald-700"
+                        >
+                          <RefreshCw size={18} />
+                        </button>
+                      </div>
+
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        Este número aparece grande en la etiqueta y es el contenido del QR.
                       </p>
                     </div>
 
@@ -1627,7 +1825,26 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     : 'SKU y código de barras se generan automáticamente, pero pueden editarse.'}
                 </div>
 
-                <div className="flex justify-end gap-3">
+                <div className="flex justify-end gap-3 flex-wrap">
+                  {formData.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const savedProduct = products.find(
+                          (product) => product.id === formData.id,
+                        );
+
+                        if (savedProduct) {
+                          openProductLabel(savedProduct);
+                        }
+                      }}
+                      className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 rounded-lg font-medium flex items-center gap-2"
+                    >
+                      <Printer size={18} />
+                      Generar etiqueta
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => setIsModalOpen(false)}
