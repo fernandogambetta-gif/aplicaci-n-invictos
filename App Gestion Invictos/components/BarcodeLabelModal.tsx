@@ -14,12 +14,14 @@ import { Product } from '../types';
 
 declare global {
   interface Window {
-    QRCode?: {
-      toCanvas: (
-        canvas: HTMLCanvasElement,
-        text: string,
-        options?: Record<string, unknown>,
-      ) => Promise<void>;
+    qrcode?: (
+      typeNumber: number,
+      errorCorrectionLevel: 'L' | 'M' | 'Q' | 'H',
+    ) => {
+      addData: (data: string) => void;
+      make: () => void;
+      getModuleCount: () => number;
+      isDark: (row: number, col: number) => boolean;
     };
   }
 }
@@ -35,7 +37,7 @@ type LabelSize = '40x15' | '50x15' | '60x15';
 type CopyMode = 'variant' | 'unit' | 'custom';
 
 const loadQrCode = (): Promise<void> => {
-  if (window.QRCode?.toCanvas) return Promise.resolve();
+  if (window.qrcode) return Promise.resolve();
 
   const existing = document.querySelector<HTMLScriptElement>(
     'script[data-invictos-qrcode="true"]',
@@ -43,12 +45,20 @@ const loadQrCode = (): Promise<void> => {
 
   if (existing) {
     return new Promise((resolve, reject) => {
-      if (window.QRCode?.toCanvas) {
+      if (window.qrcode) {
         resolve();
         return;
       }
 
-      existing.addEventListener('load', () => resolve(), { once: true });
+      existing.addEventListener(
+        'load',
+        () => {
+          if (window.qrcode) resolve();
+          else reject(new Error('La librería QR cargó, pero no quedó disponible.'));
+        },
+        { once: true },
+      );
+
       existing.addEventListener(
         'error',
         () => reject(new Error('No se pudo cargar el generador QR.')),
@@ -59,11 +69,27 @@ const loadQrCode = (): Promise<void> => {
 
   return new Promise((resolve, reject) => {
     const script = document.createElement('script');
+
+    // qrcode-generator expone globalmente window.qrcode().
+    // Evitamos QRCode.toCanvas(), que no estaba disponible en algunos navegadores.
     script.src =
-      'https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js';
+      'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js';
+
     script.async = true;
     script.dataset.invictosQrcode = 'true';
-    script.onload = () => resolve();
+
+    script.onload = () => {
+      if (window.qrcode) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            'El generador QR se descargó, pero el navegador no pudo inicializarlo.',
+          ),
+        );
+      }
+    };
+
     script.onerror = () =>
       reject(new Error('No se pudo cargar el generador QR.'));
 
@@ -212,7 +238,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
       try {
         await loadQrCode();
 
-        if (!window.QRCode?.toCanvas) {
+        if (!window.qrcode) {
           throw new Error('No se pudo inicializar el generador QR.');
         }
 
@@ -238,28 +264,56 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
         );
 
         const separatorX = qrPanelWidth;
-        const qrSize = Math.min(
+
+        /*
+         * Generamos un QR muy pequeño en contenido:
+         * solo contiene el shortCode (ej. "1007").
+         * typeNumber=0 deja que la librería elija automáticamente
+         * la versión QR más chica posible.
+         */
+        const qr = window.qrcode(0, 'M');
+        qr.addData(shortCode);
+        qr.make();
+
+        const moduleCount = qr.getModuleCount();
+
+        // Dejamos quiet zone de 4 módulos, importante para lectura confiable.
+        const quietModules = 4;
+        const totalModules = moduleCount + quietModules * 2;
+
+        const availableQrPx = Math.min(
           Math.round(heightPx * 0.72),
-          qrPanelWidth - 8,
+          qrPanelWidth - 6,
         );
 
-        const qrCanvas = document.createElement('canvas');
+        // Módulos enteros: evita que el QR salga borroso al imprimir.
+        const moduleSize = Math.max(
+          2,
+          Math.floor(availableQrPx / totalModules),
+        );
 
-        await window.QRCode.toCanvas(qrCanvas, shortCode, {
-          errorCorrectionLevel: 'M',
-          margin: 1,
-          width: qrSize,
-          color: {
-            dark: '#000000',
-            light: '#ffffff',
-          },
-        });
+        const qrSize = totalModules * moduleSize;
 
         const qrX = Math.round((qrPanelWidth - qrSize) / 2);
         const qrY = 2;
 
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(qrCanvas, qrX, qrY, qrSize, qrSize);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(qrX, qrY, qrSize, qrSize);
+
+        ctx.fillStyle = '#000000';
+
+        for (let row = 0; row < moduleCount; row += 1) {
+          for (let col = 0; col < moduleCount; col += 1) {
+            if (!qr.isDark(row, col)) continue;
+
+            ctx.fillRect(
+              qrX + (col + quietModules) * moduleSize,
+              qrY + (row + quietModules) * moduleSize,
+              moduleSize,
+              moduleSize,
+            );
+          }
+        }
 
         const codeFontSize = Math.max(12, Math.round(heightPx * 0.16));
 
@@ -335,7 +389,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
         if (!cancelled) {
           setError(
-            e?.message || 'No se pudo generar la etiqueta QR.',
+            e?.message || 'No se pudo crear el código QR.',
           );
         }
       } finally {
