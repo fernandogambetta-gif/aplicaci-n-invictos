@@ -178,6 +178,62 @@ export const StorageService = {
     });
   },
 
+  /**
+   * Blanqueo de PIN realizado por un administrador.
+   *
+   * - valida nuevamente al administrador contra Firestore;
+   * - asigna un PIN temporal al usuario;
+   * - desbloquea la cuenta;
+   * - obliga a cambiar el PIN al próximo ingreso.
+   */
+  resetUserPinByAdmin: async (
+    adminUserId: string,
+    adminPin: string,
+    targetUserId: string,
+    temporaryPin: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    if (!/^\d{4}$/.test((temporaryPin || '').trim())) {
+      throw new Error('El PIN temporal debe tener exactamente 4 números.');
+    }
+
+    const adminSnap = await getDoc(
+      doc(db, COLLECTIONS.USERS, adminUserId),
+    );
+
+    if (!adminSnap.exists()) {
+      throw new Error('No se encontró el usuario administrador.');
+    }
+
+    const admin = {
+      ...(adminSnap.data() as User),
+      id: adminSnap.id,
+    };
+
+    if (admin.role !== 'admin') {
+      throw new Error('Acceso denegado. Solo un administrador puede blanquear claves.');
+    }
+
+    if ((admin.pin || '').trim() !== (adminPin || '').trim()) {
+      throw new Error('PIN del administrador incorrecto.');
+    }
+
+    const targetRef = doc(db, COLLECTIONS.USERS, targetUserId);
+    const targetSnap = await getDoc(targetRef);
+
+    if (!targetSnap.exists()) {
+      throw new Error('No se encontró el usuario a blanquear.');
+    }
+
+    await updateDoc(targetRef, {
+      pin: temporaryPin.trim(),
+      mustChangePin: true,
+      pinUpdatedAt: Date.now(),
+      security: cleanData(DEFAULT_SECURITY),
+    });
+  },
+
   // ================= CONFIG =================
   getConfig: async (): Promise<AppConfig> => {
     if (!db) return { commissionPercentage: 5 };
