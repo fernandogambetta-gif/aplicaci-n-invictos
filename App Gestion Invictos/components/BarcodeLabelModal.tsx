@@ -257,31 +257,26 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, widthPx, heightPx);
 
-        // Nuevo diseño:
-        // QR solo, lo más grande posible, usando casi toda la altura de la etiqueta.
-        // A la derecha van: código corto grande + nombre + color/talle.
-        const outerPad = Math.max(2, Math.round(heightPx * 0.04));
+        // Ajuste fino:
+        // 1) QR todavía más grande.
+        // 2) Bloque de texto a la derecha centrado verticalmente.
+        const outerPad = 1;
         const qrPanelWidth = heightPx - outerPad * 2;
         const separatorX = qrPanelWidth + outerPad * 2;
 
-        /*
-         * Generamos un QR pequeño en contenido:
-         * solo contiene el shortCode (ej. "1007").
-         */
-        const qr = window.qrcode(0, 'M');
+        const qr = window.qrcode(0, 'L');
         qr.addData(shortCode);
         qr.make();
 
         const moduleCount = qr.getModuleCount();
 
-        // Quiet zone estándar de 4 módulos.
-        const quietModules = 4;
+        // Reducimos un poco la quiet zone para ganar tamaño manteniendo lectura.
+        const quietModules = 2;
         const totalModules = moduleCount + quietModules * 2;
 
-        // El QR usa casi todo el alto disponible de la etiqueta.
+        // El QR usa prácticamente todo el alto disponible.
         const availableQrPx = heightPx - outerPad * 2;
 
-        // Módulos enteros para que no salga borroso.
         const moduleSize = Math.max(
           2,
           Math.floor(availableQrPx / totalModules),
@@ -289,7 +284,6 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
         const qrSize = totalModules * moduleSize;
 
-        // Centramos el QR dentro de un panel cuadrado a la izquierda.
         const qrX = outerPad + Math.round((qrPanelWidth - qrSize) / 2);
         const qrY = outerPad + Math.round((availableQrPx - qrSize) / 2);
 
@@ -311,21 +305,20 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           }
         }
 
-        // Separador
+        // Separador más ajustado al alto total
         ctx.strokeStyle = '#000000';
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(separatorX, outerPad);
-        ctx.lineTo(separatorX, heightPx - outerPad);
+        ctx.moveTo(separatorX, 0);
+        ctx.lineTo(separatorX, heightPx);
         ctx.stroke();
 
         // Bloque de texto a la derecha
         const textX = separatorX + 6;
-        const textMaxWidth = widthPx - textX - 5;
-        const textTop = outerPad + 1;
+        const textMaxWidth = widthPx - textX - 4;
 
         const codeFont =
-          widthMm <= 40 ? 13 : widthMm >= 60 ? 18 : 15;
+          widthMm <= 40 ? 15 : widthMm >= 60 ? 20 : 17;
         const titleFont =
           widthMm <= 40 ? 9 : widthMm >= 60 ? 13 : 11;
         const variantFont =
@@ -335,13 +328,14 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
         ctx.textBaseline = 'top';
         ctx.fillStyle = '#000000';
 
-        // Código corto grande arriba
-        ctx.font = `900 ${codeFont}px Arial`;
-        ctx.fillText(shortCode, textX, textTop);
+        const variant = [
+          product.color,
+          product.size ? `T. ${product.size}` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
 
-        let y = textTop + Math.round(codeFont * 1.02) + 1;
-
-        // Nombre del producto
+        // Precalculamos las líneas para centrar verticalmente
         ctx.font = `800 ${titleFont}px Arial`;
         const nameLines = wrapLines(
           ctx,
@@ -350,23 +344,43 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           2,
         );
 
+        ctx.font = `700 ${variantFont}px Arial`;
+        const variantLines = variant
+          ? wrapLines(ctx, variant, textMaxWidth, 2)
+          : [];
+
+        const codeHeight = Math.round(codeFont * 1.0);
+        const nameHeight = nameLines.length * Math.round(titleFont * 1.05);
+        const variantHeight = variantLines.length * Math.round(variantFont * 1.04);
+        const gap1 = 2;
+        const gap2 = variantLines.length ? 2 : 0;
+
+        const totalTextHeight =
+          codeHeight + gap1 + nameHeight + gap2 + variantHeight;
+
+        let y = Math.max(
+          1,
+          Math.round((heightPx - totalTextHeight) / 2),
+        );
+
+        // Código corto grande
+        ctx.font = `900 ${codeFont}px Arial`;
+        ctx.fillText(shortCode, textX, y);
+        y += codeHeight + gap1;
+
+        // Nombre del producto
+        ctx.font = `800 ${titleFont}px Arial`;
         nameLines.forEach((line) => {
           ctx.fillText(line, textX, y);
           y += Math.round(titleFont * 1.05);
         });
 
-        const variant = [
-          product.color,
-          product.size ? `T. ${product.size}` : '',
-        ]
-          .filter(Boolean)
-          .join(' · ');
-
-        if (variant) {
-          y += 1;
+        // Color / talle
+        if (variantLines.length) {
+          y += gap2;
           ctx.font = `700 ${variantFont}px Arial`;
 
-          wrapLines(ctx, variant, textMaxWidth, 2).forEach((line) => {
+          variantLines.forEach((line) => {
             ctx.fillText(line, textX, y);
             y += Math.round(variantFont * 1.04);
           });
@@ -638,7 +652,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                     </div>
 
                     <p className="text-xs text-emerald-700 mt-1">
-                      El QR ocupa prácticamente toda la altura útil de la etiqueta. Contiene solamente este número corto, que también podés escribir manualmente en Caja.
+                      El QR ahora ocupa todavía más superficie útil de la etiqueta. A la derecha, el código corto y la descripción quedan centrados verticalmente para mejorar la lectura.
                     </p>
                   </div>
                 </div>
