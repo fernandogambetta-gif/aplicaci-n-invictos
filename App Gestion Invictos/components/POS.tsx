@@ -32,9 +32,11 @@ import {
   ChevronUp,
   Barcode,
   PackagePlus,
+  Shirt,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
+import VariantLookupModal from './VariantLookupModal';
 
 interface POSProps {
   products: Product[];
@@ -74,6 +76,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [scanError, setScanError] = useState('');
+  const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
 
   const toNumber = (value: unknown, fallback = 0): number => {
     const n =
@@ -783,6 +786,15 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           </div>
 
           <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setIsVariantLookupOpen(true)}
+              className="bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-700 px-3 py-2 rounded-lg flex items-center gap-2 text-sm font-semibold"
+            >
+              <Shirt size={18} />
+              Talles / Colores
+            </button>
+
             <button
               type="button"
               onClick={() => {
@@ -1586,6 +1598,14 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           </button>
         </div>
       </div>
+
+      <VariantLookupModal
+        open={isVariantLookupOpen}
+        products={products}
+        onClose={() => setIsVariantLookupOpen(false)}
+        onSelectProduct={addToCart}
+        closeOnSelect
+      />
 
       <BarcodeScannerModal
         open={isScannerOpen}
