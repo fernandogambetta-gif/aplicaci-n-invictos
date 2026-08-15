@@ -69,6 +69,16 @@ const UserManagement: React.FC<UserManagementProps> = ({
   const [isResettingSales, setIsResettingSales] = useState(false);
   const [resetError, setResetError] = useState('');
 
+  // Blanqueo administrativo de PIN
+  const [pinResetUser, setPinResetUser] = useState<User | null>(null);
+  const [temporaryPin, setTemporaryPin] = useState('');
+  const [repeatTemporaryPin, setRepeatTemporaryPin] = useState('');
+  const [adminConfirmPin, setAdminConfirmPin] = useState('');
+  const [showTemporaryPin, setShowTemporaryPin] = useState(false);
+  const [showAdminConfirmPin, setShowAdminConfirmPin] = useState(false);
+  const [pinResetError, setPinResetError] = useState('');
+  const [isResettingUserPin, setIsResettingUserPin] = useState(false);
+
   const loadUsers = async () => {
     setIsLoading(true);
     setError('');
@@ -145,10 +155,6 @@ const UserManagement: React.FC<UserManagementProps> = ({
       return 'El PIN del nuevo usuario debe tener exactamente 4 números.';
     }
 
-    if (editingUser && form.pin && !/^\d{4}$/.test(form.pin)) {
-      return 'El nuevo PIN debe tener exactamente 4 números.';
-    }
-
     const commission = Number(form.commissionPercentage);
     if (!Number.isFinite(commission) || commission < 0 || commission > 100) {
       return 'La comisión debe estar entre 0 y 100%.';
@@ -188,7 +194,7 @@ const UserManagement: React.FC<UserManagementProps> = ({
           ...editingUser,
           name: form.name.trim(),
           role: form.role,
-          pin: form.pin ? form.pin : editingUser.pin,
+          pin: editingUser.pin,
           commissionPercentage: commission,
         };
 
@@ -260,6 +266,99 @@ const UserManagement: React.FC<UserManagementProps> = ({
     } catch (e: any) {
       console.error('Error eliminando usuario:', e);
       setError(e?.message || 'No se pudo eliminar el usuario.');
+    }
+  };
+
+  const openPinReset = (user: User) => {
+    clearMessages();
+
+    if (user.id === currentUser.id) {
+      setError(
+        'Para cambiar tu propia contraseña usá el engranaje junto a tu nombre.',
+      );
+      return;
+    }
+
+    setPinResetUser(user);
+    setTemporaryPin('');
+    setRepeatTemporaryPin('');
+    setAdminConfirmPin('');
+    setShowTemporaryPin(false);
+    setShowAdminConfirmPin(false);
+    setPinResetError('');
+  };
+
+  const closePinReset = () => {
+    if (isResettingUserPin) return;
+
+    setPinResetUser(null);
+    setTemporaryPin('');
+    setRepeatTemporaryPin('');
+    setAdminConfirmPin('');
+    setShowTemporaryPin(false);
+    setShowAdminConfirmPin(false);
+    setPinResetError('');
+  };
+
+  const handleAdminResetPin = async () => {
+    setPinResetError('');
+
+    if (!pinResetUser) return;
+
+    if (currentUser.role !== 'admin') {
+      setPinResetError('Solo un administrador puede blanquear una contraseña.');
+      return;
+    }
+
+    if (!/^\d{4}$/.test(temporaryPin)) {
+      setPinResetError('El PIN temporal debe tener exactamente 4 números.');
+      return;
+    }
+
+    if (temporaryPin !== repeatTemporaryPin) {
+      setPinResetError('La repetición del PIN temporal no coincide.');
+      return;
+    }
+
+    if (!/^\d{4}$/.test(adminConfirmPin)) {
+      setPinResetError('Ingresá tu PIN de administrador para confirmar.');
+      return;
+    }
+
+    if (adminConfirmPin === temporaryPin) {
+      setPinResetError(
+        'Por seguridad, el PIN temporal del usuario debe ser distinto de tu PIN de administrador.',
+      );
+      return;
+    }
+
+    setIsResettingUserPin(true);
+
+    try {
+      await StorageService.resetUserPinByAdmin(
+        currentUser.id,
+        adminConfirmPin,
+        pinResetUser.id,
+        temporaryPin,
+      );
+
+      const targetName = pinResetUser.name;
+      const tempToShow = temporaryPin;
+
+      await loadUsers();
+      closePinReset();
+
+      setSuccess(
+        `PIN de “${targetName}” blanqueado. PIN temporal: ${tempToShow}. ` +
+          'Al ingresar deberá cambiarlo obligatoriamente.',
+      );
+    } catch (e: any) {
+      console.error('Error blanqueando PIN:', e);
+      setPinResetError(
+        e?.message || 'No se pudo blanquear el PIN del usuario.',
+      );
+    } finally {
+      setIsResettingUserPin(false);
     }
   };
 
@@ -356,6 +455,14 @@ const UserManagement: React.FC<UserManagementProps> = ({
         label: 'Bloqueo temporal',
         className: 'bg-amber-100 text-amber-700',
         icon: Clock,
+      };
+    }
+
+    if (user.mustChangePin) {
+      return {
+        label: 'PIN temporal',
+        className: 'bg-violet-100 text-violet-700',
+        icon: KeyRound,
       };
     }
 
@@ -538,7 +645,17 @@ const UserManagement: React.FC<UserManagementProps> = ({
 
                           <button
                             type="button"
-                            title="Editar usuario / cambiar PIN"
+                            title={isCurrent ? 'Cambiá tu PIN desde el engranaje de tu perfil' : 'Blanquear PIN / contraseña'}
+                            disabled={isCurrent}
+                            onClick={() => openPinReset(user)}
+                            className="p-2 rounded-lg text-violet-600 hover:bg-violet-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <KeyRound size={18} />
+                          </button>
+
+                          <button
+                            type="button"
+                            title="Editar usuario"
                             onClick={() => openEditUser(user)}
                             className="p-2 rounded-lg text-blue-600 hover:bg-blue-50"
                           >
@@ -623,6 +740,177 @@ const UserManagement: React.FC<UserManagementProps> = ({
           </div>
         </div>
       </div>
+
+      {pinResetUser && (
+        <div className="fixed inset-0 z-[10020] bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div className="px-6 py-4 bg-violet-50 border-b border-violet-200 flex items-start justify-between gap-4">
+              <div>
+                <div className="text-xs uppercase tracking-wide font-bold text-violet-600">
+                  Administración de usuarios
+                </div>
+
+                <h3 className="text-xl font-bold text-slate-900 mt-1 flex items-center gap-2">
+                  <KeyRound size={21} />
+                  Blanquear PIN
+                </h3>
+              </div>
+
+              <button
+                type="button"
+                onClick={closePinReset}
+                disabled={isResettingUserPin}
+                className="p-1 text-slate-400 hover:text-slate-700 disabled:opacity-40"
+              >
+                <X size={21} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-5">
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
+                <div className="text-xs text-slate-500">
+                  Usuario al que se blanqueará la contraseña
+                </div>
+
+                <div className="font-bold text-slate-900 text-lg mt-0.5">
+                  {pinResetUser.name}
+                </div>
+
+                <div className="text-xs text-slate-400 mt-1">
+                  {pinResetUser.role === 'admin' ? 'Administrador' : 'Vendedor'}
+                </div>
+              </div>
+
+              <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-sm text-amber-800 flex gap-2">
+                <AlertTriangle size={17} className="shrink-0 mt-0.5" />
+
+                <span>
+                  El PIN anterior dejará de funcionar. El nuevo PIN será temporal y el usuario deberá cambiarlo obligatoriamente al ingresar.
+                </span>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Nuevo PIN temporal
+                </label>
+
+                <div className="relative">
+                  <input
+                    type={showTemporaryPin ? 'text' : 'password'}
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={temporaryPin}
+                    onChange={(e) => {
+                      setTemporaryPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                      setPinResetError('');
+                    }}
+                    placeholder="••••"
+                    className="w-full text-center text-2xl tracking-[0.45em] font-bold border border-slate-300 rounded-xl px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => setShowTemporaryPin((prev) => !prev)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                  >
+                    {showTemporaryPin ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Repetir PIN temporal
+                </label>
+
+                <input
+                  type={showTemporaryPin ? 'text' : 'password'}
+                  inputMode="numeric"
+                  maxLength={4}
+                  value={repeatTemporaryPin}
+                  onChange={(e) => {
+                    setRepeatTemporaryPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                    setPinResetError('');
+                  }}
+                  placeholder="••••"
+                  className="w-full text-center text-2xl tracking-[0.45em] font-bold border border-slate-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-200">
+                <label className="block text-sm font-semibold text-slate-700 mb-1.5">
+                  Confirmá tu PIN de administrador
+                </label>
+
+                <div className="relative">
+                  <input
+                    type={showAdminConfirmPin ? 'text' : 'password'}
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={adminConfirmPin}
+                    onChange={(e) => {
+                      setAdminConfirmPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                      setPinResetError('');
+                    }}
+                    placeholder="••••"
+                    className="w-full text-center text-2xl tracking-[0.45em] font-bold border border-slate-300 rounded-xl px-4 py-3 pr-12 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => setShowAdminConfirmPin((prev) => !prev)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                  >
+                    {showAdminConfirmPin ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Esta confirmación evita que otra persona use una sesión administrativa abierta para cambiar claves.
+                </p>
+              </div>
+
+              {pinResetError && (
+                <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-700 flex gap-2">
+                  <AlertTriangle size={17} className="shrink-0 mt-0.5" />
+                  <span>{pinResetError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={closePinReset}
+                  disabled={isResettingUserPin}
+                  className="py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => void handleAdminResetPin()}
+                  disabled={
+                    isResettingUserPin ||
+                    temporaryPin.length !== 4 ||
+                    repeatTemporaryPin.length !== 4 ||
+                    adminConfirmPin.length !== 4
+                  }
+                  className="py-3 rounded-xl bg-violet-600 hover:bg-violet-700 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isResettingUserPin ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <KeyRound size={18} />
+                  )}
+
+                  {isResettingUserPin ? 'Blanqueando...' : 'Blanquear PIN'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isResetModalOpen && (
         <div className="fixed inset-0 z-[10000] bg-black/60 flex items-center justify-center p-4">
@@ -808,7 +1096,7 @@ const UserManagement: React.FC<UserManagementProps> = ({
                   {editingUser ? 'Editar Usuario' : 'Nuevo Usuario'}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  {editingUser ? 'Modificá permisos, comisión o PIN.' : 'Creá una nueva cuenta de acceso.'}
+                  {editingUser ? 'Modificá nombre, permisos o comisión.' : 'Creá una nueva cuenta de acceso.'}
                 </p>
               </div>
 
@@ -882,38 +1170,49 @@ const UserManagement: React.FC<UserManagementProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">
-                  {editingUser ? 'Nuevo PIN (opcional)' : 'PIN de acceso'}
-                </label>
+              {!editingUser && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    PIN inicial de acceso
+                  </label>
 
-                <div className="flex gap-2">
-                  <input
-                    type={showPin ? 'text' : 'password'}
-                    inputMode="numeric"
-                    maxLength={4}
-                    value={form.pin}
-                    onChange={(e) => {
-                      const onlyDigits = e.target.value.replace(/\D/g, '').slice(0, 4);
-                      setForm((prev) => ({ ...prev, pin: onlyDigits }));
-                    }}
-                    className="flex-1 border border-slate-300 rounded-lg p-2.5 font-mono tracking-[0.35em] focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                    placeholder={editingUser ? 'Dejar vacío para conservar' : '0000'}
-                  />
+                  <div className="flex gap-2">
+                    <input
+                      type={showPin ? 'text' : 'password'}
+                      inputMode="numeric"
+                      maxLength={4}
+                      value={form.pin}
+                      onChange={(e) => {
+                        const onlyDigits = e.target.value.replace(/\D/g, '').slice(0, 4);
+                        setForm((prev) => ({ ...prev, pin: onlyDigits }));
+                      }}
+                      className="flex-1 border border-slate-300 rounded-lg p-2.5 font-mono tracking-[0.35em] focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      placeholder="0000"
+                    />
 
-                  <button
-                    type="button"
-                    onClick={() => setShowPin((value) => !value)}
-                    className="px-3 border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50 text-xs font-semibold"
-                  >
-                    {showPin ? 'Ocultar' : 'Ver'}
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowPin((value) => !value)}
+                      className="px-3 border border-slate-300 rounded-lg text-slate-600 hover:bg-slate-50 text-xs font-semibold"
+                    >
+                      {showPin ? 'Ocultar' : 'Ver'}
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 mt-1">
+                    Exactamente 4 números. Luego el usuario podrá cambiarlo desde su perfil.
+                  </p>
                 </div>
+              )}
 
-                <p className="text-[11px] text-slate-400 mt-1">
-                  Exactamente 4 números.
-                </p>
-              </div>
+              {editingUser && (
+                <div className="bg-violet-50 border border-violet-200 rounded-xl p-3 text-sm text-violet-800 flex items-start gap-2">
+                  <KeyRound size={17} className="shrink-0 mt-0.5" />
+                  <span>
+                    Para cambiar o blanquear la contraseña usá el botón de la llave en la tabla de usuarios.
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
