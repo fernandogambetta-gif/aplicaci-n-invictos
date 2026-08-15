@@ -201,6 +201,8 @@ const App: React.FC = () => {
           <UserManagement
             currentUser={currentUser}
             onCurrentUserUpdate={setCurrentUser}
+            salesCount={sales.length}
+            onDataReset={refreshData}
           />
         ) : (
           <Dashboard
@@ -269,5 +271,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-
-
