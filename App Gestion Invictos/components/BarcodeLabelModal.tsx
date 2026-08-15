@@ -1,11 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { X, Printer, Loader2, Barcode as BarcodeIcon } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  X,
+  Loader2,
+  Barcode as BarcodeIcon,
+  Download,
+  Share2,
+  Image as ImageIcon,
+} from 'lucide-react';
 import { Product } from '../types';
 
 declare global {
   interface Window {
     JsBarcode?: (
-      element: SVGElement,
+      element: SVGElement | HTMLCanvasElement,
       value: string,
       options?: Record<string, unknown>,
     ) => void;
@@ -16,9 +23,14 @@ interface BarcodeLabelModalProps {
   open: boolean;
   product: Product | null;
   onClose: () => void;
+
+  // Si viene desde un ingreso de mercadería, permite elegir
+  // la cantidad sugerida de etiquetas a imprimir luego en NIIMBOT.
+  stockEntryQuantity?: number;
 }
 
 type LabelSize = '40x15' | '50x15' | '60x15';
+type CopyMode = 'variant' | 'unit' | 'custom';
 
 const loadJsBarcode = (): Promise<void> => {
   if (window.JsBarcode) return Promise.resolve();
@@ -71,6 +83,9 @@ const sizeToMm = (size: LabelSize) => {
   return { width, height };
 };
 
+const mmToPx = (mm: number, dpi = 203): number =>
+  Math.max(1, Math.round((mm / 25.4) * dpi));
+
 const getBarcodeFormat = (
   value: string,
 ): 'EAN13' | 'EAN8' | 'CODE128' => {
@@ -79,19 +94,90 @@ const getBarcodeFormat = (
   return 'CODE128';
 };
 
+const sanitizeFileName = (value: string): string =>
+  value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80) || 'etiqueta';
+
+const wrapLines = (
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  maxWidth: number,
+  maxLines: number,
+): string[] => {
+  const clean = (text || '').trim();
+  if (!clean) return [];
+
+  const words = clean.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    const trial = current ? `${current} ${word}` : word;
+    const width = ctx.measureText(trial).width;
+
+    if (width <= maxWidth || !current) {
+      current = trial;
+    } else {
+      lines.push(current);
+      current = word;
+
+      if (lines.length === maxLines - 1) {
+        break;
+      }
+    }
+  }
+
+  if (lines.length < maxLines && current) {
+    lines.push(current);
+  }
+
+  if (lines.length > maxLines) {
+    lines.length = maxLines;
+  }
+
+  if (
+    words.length > 0 &&
+    lines.length === maxLines &&
+    lines.join(' ') !== clean
+  ) {
+    const last = lines[maxLines - 1];
+    if (!last.endsWith('…')) {
+      lines[maxLines - 1] =
+        last.length > 1 ? `${last.slice(0, -1)}…` : `${last}…`;
+    }
+  }
+
+  return lines;
+};
+
+const dataUrlToFile = async (
+  dataUrl: string,
+  fileName: string,
+): Promise<File> => {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], fileName, { type: 'image/png' });
+};
+
 const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   open,
   product,
   onClose,
+  stockEntryQuantity,
 }) => {
-  const svgRef = useRef<SVGSVGElement | null>(null);
-
   const [copies, setCopies] = useState(1);
+  const [copyMode, setCopyMode] = useState<CopyMode>('custom');
   const [labelSize, setLabelSize] =
     useState<LabelSize>('50x15');
   const [isLoading, setIsLoading] =
     useState(false);
   const [error, setError] = useState('');
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [isSharing, setIsSharing] = useState(false);
 
   const barcodeValue = (
     product?.barcode ||
@@ -102,35 +188,98 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   const barcodeFormat =
     getBarcodeFormat(barcodeValue);
 
+  const suggestedCopies = useMemo(
+    () =>
+      Math.max(
+        1,
+        Math.min(100, Number(copies) || 1),
+      ),
+    [copies],
+  );
+
+  const fileName = useMemo(() => {
+    const baseName = sanitizeFileName(
+      product?.code || product?.name || 'etiqueta',
+    );
+    return `${baseName}_${labelSize}.png`;
+  }, [product?.code, product?.name, labelSize]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const entryQty = Math.max(
+      0,
+      Number(stockEntryQuantity || 0),
+    );
+
+    if (entryQty > 0) {
+      setCopyMode('unit');
+      setCopies(entryQty);
+    } else {
+      setCopyMode('custom');
+      setCopies(1);
+    }
+
+    setLabelSize('50x15');
+    setError('');
+    setPreviewUrl('');
+  }, [open, product?.id, stockEntryQuantity]);
+
   useEffect(() => {
     if (!open || !product || !barcodeValue) return;
 
     let cancelled = false;
 
-    const renderBarcode = async () => {
+    const renderLabel = async () => {
       setError('');
       setIsLoading(true);
 
       try {
         await loadJsBarcode();
 
-        if (
-          cancelled ||
-          !svgRef.current ||
-          !window.JsBarcode
-        ) {
-          return;
+        if (!window.JsBarcode) {
+          throw new Error(
+            'No se pudo inicializar el generador de códigos de barras.',
+          );
         }
 
-        /*
-         * Para etiquetas de 15 mm de alto:
-         * - barras altas y limpias;
-         * - número claramente visible;
-         * - EAN13/EAN8 cuando corresponde;
-         * - CODE128 solo como respaldo para SKU/códigos alfanuméricos.
-         */
+        const { width: widthMm, height: heightMm } =
+          sizeToMm(labelSize);
+
+        const dpi = 203;
+        const widthPx = mmToPx(widthMm, dpi);
+        const heightPx = mmToPx(heightMm, dpi);
+
+        const canvas =
+          document.createElement('canvas');
+        canvas.width = widthPx;
+        canvas.height = heightPx;
+
+        const ctx = canvas.getContext('2d');
+
+        if (!ctx) {
+          throw new Error(
+            'No se pudo crear la imagen PNG.',
+          );
+        }
+
+        // Fondo
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, widthPx, heightPx);
+
+        const barcodeZoneWidth = Math.round(
+          widthPx * (widthMm <= 40 ? 0.70 : 0.68),
+        );
+        const descriptionZoneX = barcodeZoneWidth + 1;
+        const descriptionZoneWidth =
+          widthPx - descriptionZoneX - 1;
+
+        // Canvas temporal para barcode
+        const barcodeCanvas =
+          document.createElement('canvas');
+
         window.JsBarcode(
-          svgRef.current,
+          barcodeCanvas,
           barcodeValue,
           {
             format: barcodeFormat,
@@ -139,31 +288,143 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
             fontOptions: 'bold',
             fontSize:
               barcodeFormat === 'CODE128'
-                ? 13
-                : 14,
+                ? 12
+                : 13,
             textMargin: 2,
             height:
               barcodeFormat === 'CODE128'
-                ? 34
-                : 37,
+                ? Math.max(
+                    32,
+                    Math.round(heightPx * 0.48),
+                  )
+                : Math.max(
+                    34,
+                    Math.round(heightPx * 0.52),
+                  ),
             width:
               barcodeFormat === 'CODE128'
-                ? 1.35
-                : 1.15,
-            margin: 2,
-            marginLeft: 4,
-            marginRight: 4,
+                ? 1.6
+                : 1.35,
+            margin: 4,
             background: '#ffffff',
             lineColor: '#000000',
           },
         );
+
+        // Dibujo del barcode
+        const padX = Math.max(4, Math.round(widthPx * 0.01));
+        const padY = Math.max(4, Math.round(heightPx * 0.04));
+
+        const targetW = barcodeZoneWidth - padX * 2;
+        const targetH = heightPx - padY * 2;
+
+        const barcodeAspect =
+          barcodeCanvas.width / barcodeCanvas.height;
+
+        let drawW = targetW;
+        let drawH = drawW / barcodeAspect;
+
+        if (drawH > targetH) {
+          drawH = targetH;
+          drawW = drawH * barcodeAspect;
+        }
+
+        const drawX =
+          Math.round((barcodeZoneWidth - drawW) / 2);
+        const drawY =
+          Math.round((heightPx - drawH) / 2);
+
+        ctx.drawImage(
+          barcodeCanvas,
+          drawX,
+          drawY,
+          drawW,
+          drawH,
+        );
+
+        // Separador vertical
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(barcodeZoneWidth, 0);
+        ctx.lineTo(barcodeZoneWidth, heightPx);
+        ctx.stroke();
+
+        // Texto a la derecha
+        const textPadX = Math.max(
+          7,
+          Math.round(widthPx * 0.018),
+        );
+        const textPadY = Math.max(
+          10,
+          Math.round(heightPx * 0.1),
+        );
+        const textX = descriptionZoneX + textPadX;
+        const textMaxWidth =
+          descriptionZoneWidth - textPadX * 2;
+
+        const variant = [
+          product.color,
+          product.size
+            ? `T. ${product.size}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+
+        const titleFontSize =
+          widthMm <= 40 ? 11 : widthMm >= 60 ? 14 : 12;
+        const variantFontSize =
+          widthMm <= 40 ? 9 : widthMm >= 60 ? 11 : 10;
+
+        ctx.fillStyle = '#000000';
+        ctx.textBaseline = 'top';
+
+        ctx.font = `700 ${titleFontSize}px Arial`;
+        const nameLines = wrapLines(
+          ctx,
+          product.name || '',
+          textMaxWidth,
+          variant ? 2 : 3,
+        );
+
+        let cursorY = textPadY;
+
+        nameLines.forEach((line) => {
+          ctx.fillText(line, textX, cursorY);
+          cursorY += Math.round(titleFontSize * 1.1);
+        });
+
+        if (variant) {
+          cursorY += 2;
+          ctx.font = `700 ${variantFontSize}px Arial`;
+          const variantLines = wrapLines(
+            ctx,
+            variant,
+            textMaxWidth,
+            2,
+          );
+
+          variantLines.forEach((line) => {
+            ctx.fillText(line, textX, cursorY);
+            cursorY += Math.round(
+              variantFontSize * 1.08,
+            );
+          });
+        }
+
+        const url = canvas.toDataURL('image/png');
+
+        if (!cancelled) {
+          setPreviewUrl(url);
+        }
       } catch (e: any) {
         console.error(e);
 
         if (!cancelled) {
           setError(
             e?.message ||
-              'No se pudo generar el código de barras.',
+              'No se pudo generar la imagen PNG de la etiqueta.',
           );
         }
       } finally {
@@ -173,7 +434,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
       }
     };
 
-    void renderBarcode();
+    void renderLabel();
 
     return () => {
       cancelled = true;
@@ -186,242 +447,73 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
     labelSize,
   ]);
 
-  useEffect(() => {
-    if (!open) return;
-
-    setCopies(1);
-    setLabelSize('50x15');
-    setError('');
-  }, [open, product?.id]);
-
   if (!open || !product) return null;
 
-  const variant = [
-    product.color,
-    product.size
-      ? `T. ${product.size}`
-      : '',
-  ]
-    .filter(Boolean)
-    .join(' · ');
-
-  const handlePrint = () => {
-    if (!svgRef.current || !barcodeValue) {
+  const handleDownload = () => {
+    if (!previewUrl) {
       setError(
-        'Este producto no tiene un código para imprimir.',
+        'La imagen todavía se está generando. Esperá un momento e intentá nuevamente.',
       );
       return;
     }
 
-    const { width, height } =
-      sizeToMm(labelSize);
-
-    const svgMarkup =
-      svgRef.current.outerHTML;
-
-    const safeCopies = Math.max(
-      1,
-      Math.min(
-        100,
-        Number(copies) || 1,
-      ),
-    );
-
-    /*
-     * Repartimos la etiqueta horizontalmente.
-     * En 50x15:
-     *   aprox. 34 mm para barcode + número
-     *   aprox. 16 mm para descripción
-     */
-    const barcodeWidthPercent =
-      width <= 40 ? 70 : 68;
-
-    const descriptionWidthPercent =
-      100 - barcodeWidthPercent;
-
-    const labels = Array.from({
-      length: safeCopies,
-    })
-      .map(
-        () => `
-          <section class="label">
-            <div class="barcode-zone">
-              <div class="barcode">
-                ${svgMarkup}
-              </div>
-            </div>
-
-            <div class="description-zone">
-              <div class="name">
-                ${escapeHtml(product.name)}
-              </div>
-
-              ${
-                variant
-                  ? `<div class="variant">${escapeHtml(
-                      variant,
-                    )}</div>`
-                  : ''
-              }
-            </div>
-          </section>
-        `,
-      )
-      .join('');
-
-    const printWindow = window.open(
-      '',
-      '_blank',
-      'width=800,height=650',
-    );
-
-    if (!printWindow) {
-      setError(
-        'El navegador bloqueó la ventana de impresión. Permití ventanas emergentes para INVICTOS.',
-      );
-      return;
-    }
-
-    printWindow.document.open();
-
-    printWindow.document.write(`<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Etiqueta - ${escapeHtml(
-    product.name,
-  )}</title>
-
-  <style>
-    @page {
-      size: ${width}mm ${height}mm;
-      margin: 0;
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    html,
-    body {
-      margin: 0;
-      padding: 0;
-      background: #fff;
-      font-family: Arial, Helvetica, sans-serif;
-    }
-
-    .label {
-      width: ${width}mm;
-      height: ${height}mm;
-      overflow: hidden;
-      display: flex;
-      flex-direction: row;
-      align-items: stretch;
-      justify-content: flex-start;
-      background: #fff;
-      color: #000;
-      break-after: page;
-      page-break-after: always;
-    }
-
-    .label:last-child {
-      break-after: auto;
-      page-break-after: auto;
-    }
-
-    .barcode-zone {
-      width: ${barcodeWidthPercent}%;
-      height: 100%;
-      padding: 0.7mm 0.4mm 0.45mm 0.7mm;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-    }
-
-    .barcode {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .barcode svg {
-      display: block;
-      width: 100% !important;
-      height: 13.4mm !important;
-      max-width: 100%;
-      overflow: visible;
-    }
-
-    .description-zone {
-      width: ${descriptionWidthPercent}%;
-      height: 100%;
-      border-left: 0.25mm solid #000;
-      padding: 1.1mm 0.8mm 0.8mm 0.9mm;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: flex-start;
-      overflow: hidden;
-    }
-
-    .name {
-      width: 100%;
-      font-size: ${
-        width <= 40 ? '6.8pt' : '7.5pt'
-      };
-      line-height: 1.08;
-      font-weight: 800;
-      overflow-wrap: anywhere;
-      word-break: normal;
-    }
-
-    .variant {
-      width: 100%;
-      margin-top: 0.7mm;
-      font-size: ${
-        width <= 40 ? '6pt' : '6.6pt'
-      };
-      line-height: 1.05;
-      font-weight: 700;
-      color: #111;
-      overflow-wrap: anywhere;
-    }
-
-    @media print {
-      html,
-      body {
-        width: ${width}mm;
-        height: ${height}mm;
-      }
-    }
-  </style>
-</head>
-
-<body>
-  ${labels}
-
-  <script>
-    window.onload = function() {
-      setTimeout(function() {
-        window.print();
-      }, 160);
-    };
-  <\/script>
-</body>
-</html>`);
-
-    printWindow.document.close();
+    const link = document.createElement('a');
+    link.href = previewUrl;
+    link.download = fileName;
+    link.click();
   };
 
-  const previewWidth =
-    Math.min(
-      sizeToMm(labelSize).width * 6.6,
-      390,
-    );
+  const handleShare = async () => {
+    try {
+      if (!previewUrl) {
+        setError(
+          'La imagen todavía se está generando. Esperá un momento e intentá nuevamente.',
+        );
+        return;
+      }
+
+      if (
+        !navigator.share ||
+        typeof navigator.canShare !== 'function'
+      ) {
+        setError(
+          'Este dispositivo no admite compartir archivos directamente.',
+        );
+        return;
+      }
+
+      setIsSharing(true);
+
+      const file = await dataUrlToFile(
+        previewUrl,
+        fileName,
+      );
+
+      if (!navigator.canShare({ files: [file] })) {
+        setError(
+          'Este dispositivo no permite compartir este archivo PNG.',
+        );
+        return;
+      }
+
+      await navigator.share({
+        title: `Etiqueta ${product.name}`,
+        text:
+          'Etiqueta PNG generada desde INVICTOS para imprimir en NIIMBOT.',
+        files: [file],
+      });
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        console.error(e);
+        setError(
+          e?.message ||
+            'No se pudo compartir la imagen PNG.',
+        );
+      }
+    } finally {
+      setIsSharing(false);
+    }
+  };
 
   return (
     <div className="fixed inset-0 bg-black/50 z-[10020] flex items-center justify-center p-4">
@@ -429,7 +521,9 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
         <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-start gap-4">
           <div>
             <div className="text-xs uppercase tracking-wide font-semibold text-indigo-600">
-              Etiqueta compacta 15 mm
+              {stockEntryQuantity
+                ? 'Etiquetas del ingreso · PNG para NIIMBOT'
+                : 'Etiqueta de producto · PNG para NIIMBOT'}
             </div>
 
             <h3 className="text-lg font-bold text-slate-900 mt-1">
@@ -449,58 +543,120 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
         <div className="p-5 space-y-4">
           {!barcodeValue ? (
             <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
-              Este producto no tiene código de barras ni SKU para imprimir.
+              Este producto no tiene código de barras ni SKU para generar la etiqueta.
             </div>
           ) : (
             <>
+              {Boolean(stockEntryQuantity && stockEntryQuantity > 0) && (
+                <div className="border border-indigo-200 bg-indigo-50/50 rounded-xl p-4 space-y-3">
+                  <div>
+                    <div className="font-bold text-slate-800">
+                      Cantidad sugerida de etiquetas
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      Ingreso registrado: {Number(stockEntryQuantity)} unidad(es) de esta variante.
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCopyMode('variant');
+                        setCopies(1);
+                      }}
+                      className={`p-3 rounded-xl border text-left transition-colors ${
+                        copyMode === 'variant'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      <div className="font-bold text-sm">Una por variante</div>
+                      <div className={`text-[11px] mt-1 ${
+                        copyMode === 'variant' ? 'text-indigo-100' : 'text-slate-400'
+                      }`}>
+                        1 etiqueta
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCopyMode('unit');
+                        setCopies(Math.max(1, Number(stockEntryQuantity)));
+                      }}
+                      className={`p-3 rounded-xl border text-left transition-colors ${
+                        copyMode === 'unit'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      <div className="font-bold text-sm">Una por unidad</div>
+                      <div className={`text-[11px] mt-1 ${
+                        copyMode === 'unit' ? 'text-indigo-100' : 'text-slate-400'
+                      }`}>
+                        {Number(stockEntryQuantity)} etiqueta(s)
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCopyMode('custom');
+                        setCopies(1);
+                      }}
+                      className={`p-3 rounded-xl border text-left transition-colors ${
+                        copyMode === 'custom'
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      <div className="font-bold text-sm">Cantidad manual</div>
+                      <div className={`text-[11px] mt-1 ${
+                        copyMode === 'custom' ? 'text-indigo-100' : 'text-slate-400'
+                      }`}>
+                        Elegir cantidad
+                      </div>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* PREVISUALIZACION */}
               <div className="bg-slate-100 rounded-xl p-5 overflow-x-auto">
-                <div
-                  className="bg-white border border-slate-300 shadow-sm flex flex-row overflow-hidden mx-auto"
-                  style={{
-                    width: `${previewWidth}px`,
-                    height: `${15 * 6.6}px`,
-                  }}
-                >
-                  <div
-                    className="h-full flex items-center justify-center overflow-hidden px-1"
-                    style={{ width: '68%' }}
-                  >
-                    {isLoading && (
+                <div className="flex items-center justify-center min-h-[120px]">
+                  {isLoading ? (
+                    <div className="flex flex-col items-center gap-2 text-slate-500">
                       <Loader2
-                        size={22}
-                        className="animate-spin text-slate-400"
+                        size={24}
+                        className="animate-spin"
                       />
-                    )}
-
-                    <svg
-                      ref={svgRef}
-                      className={
-                        isLoading
-                          ? 'hidden'
-                          : 'w-full max-h-full'
-                      }
-                    />
-                  </div>
-
-                  <div
-                    className="h-full border-l border-black px-2 py-1.5 flex flex-col justify-center overflow-hidden"
-                    style={{ width: '32%' }}
-                  >
-                    <div className="text-[11px] leading-tight font-extrabold break-words">
-                      {product.name}
+                      <span className="text-sm">
+                        Generando PNG...
+                      </span>
                     </div>
-
-                    {variant && (
-                      <div className="text-[9px] leading-tight font-bold mt-1">
-                        {variant}
-                      </div>
-                    )}
-                  </div>
+                  ) : previewUrl ? (
+                    <img
+                      src={previewUrl}
+                      alt={`Etiqueta ${product.name}`}
+                      className="bg-white border border-slate-300 shadow-sm max-w-full h-auto"
+                      style={{
+                        width:
+                          labelSize === '40x15'
+                            ? 260
+                            : labelSize === '50x15'
+                            ? 320
+                            : 380,
+                      }}
+                    />
+                  ) : (
+                    <div className="text-slate-400 text-sm">
+                      No se pudo generar la previsualización.
+                    </div>
+                  )}
                 </div>
               </div>
 
-              {/* CONTROLES */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">
@@ -531,7 +687,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">
-                    Cantidad
+                    Cantidad sugerida
                   </label>
 
                   <input
@@ -539,7 +695,8 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                     min="1"
                     max="100"
                     value={copies}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      setCopyMode('custom');
                       setCopies(
                         Math.max(
                           1,
@@ -551,8 +708,8 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                             ) || 1,
                           ),
                         ),
-                      )
-                    }
+                      );
+                    }}
                     className="w-full border border-slate-300 rounded-lg px-3 py-2"
                   />
                 </div>
@@ -578,11 +735,24 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                       {barcodeValue}
                     </strong>
                   </div>
+
+                  <div className="mt-1">
+                    Cantidad sugerida para imprimir en NIIMBOT:{' '}
+                    <strong className="text-slate-900">
+                      {suggestedCopies}
+                    </strong>
+                  </div>
                 </div>
               </div>
 
-              <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-xs text-indigo-800">
-                Para mejorar la lectura, la etiqueta deja únicamente el código con su número y la descripción al costado. No imprime marca ni precio.
+              <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 text-xs text-indigo-800 flex gap-2">
+                <ImageIcon
+                  size={16}
+                  className="shrink-0 mt-0.5"
+                />
+                <div>
+                  Este archivo se descarga como <strong>PNG</strong>. Luego podés abrir la app de NIIMBOT y subir la imagen para imprimirla desde el celular.
+                </div>
               </div>
             </>
           )}
@@ -593,25 +763,40 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 pt-1 flex-wrap">
             <button
               type="button"
               onClick={onClose}
               className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
             >
-              Cancelar
+              Cerrar
             </button>
+
+            {typeof navigator !== 'undefined' &&
+              typeof navigator.share === 'function' && (
+                <button
+                  type="button"
+                  onClick={() => void handleShare()}
+                  disabled={!barcodeValue || isLoading || !previewUrl || isSharing}
+                  className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isSharing ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <Share2 size={18} />
+                  )}
+                  Compartir PNG
+                </button>
+              )}
 
             <button
               type="button"
-              onClick={handlePrint}
-              disabled={
-                !barcodeValue || isLoading
-              }
+              onClick={handleDownload}
+              disabled={!barcodeValue || isLoading || !previewUrl}
               className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50"
             >
-              <Printer size={18} />
-              Imprimir etiqueta
+              <Download size={18} />
+              Descargar PNG
             </button>
           </div>
         </div>
@@ -619,15 +804,5 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
     </div>
   );
 };
-
-const escapeHtml = (
-  value: string,
-): string =>
-  String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
 
 export default BarcodeLabelModal;
