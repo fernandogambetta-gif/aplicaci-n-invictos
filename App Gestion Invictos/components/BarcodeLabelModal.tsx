@@ -550,8 +550,8 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
 
   return (
     <div className="fixed inset-0 bg-black/50 z-[10020] flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full overflow-hidden">
-        <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-start gap-4">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full max-h-[94vh] overflow-hidden flex flex-col">
+        <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-start gap-4 shrink-0">
           <div>
             <div className="text-xs uppercase tracking-wide font-semibold text-indigo-600">
               {stockEntryQuantity
@@ -573,7 +573,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="p-4 sm:p-5 space-y-4 overflow-y-auto overscroll-contain flex-1 min-h-0 pb-28 sm:pb-5">
           {!barcodeValue ? (
             <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4 text-sm">
               Este producto no tiene código de barras ni SKU para generar la etiqueta.
@@ -817,22 +817,18 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
             </div>
           )}
 
-          <div className="flex justify-end gap-2 pt-1 flex-wrap">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
-            >
-              Cerrar
-            </button>
+        </div>
 
+        {/* BARRA DE ACCIONES SIEMPRE VISIBLE */}
+        <div className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4 shadow-[0_-8px_20px_rgba(15,23,42,0.08)]">
+          <div className="grid grid-cols-1 sm:flex sm:justify-end gap-2">
             {typeof navigator !== 'undefined' &&
               typeof navigator.share === 'function' && (
                 <button
                   type="button"
                   onClick={() => void handleShare()}
                   disabled={!barcodeValue || isLoading || !previewUrl || isSharing}
-                  className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50"
+                  className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {isSharing ? (
                     <Loader2 size={18} className="animate-spin" />
@@ -847,10 +843,18 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
               type="button"
               onClick={handleDownload}
               disabled={!barcodeValue || isLoading || !previewUrl}
-              className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50"
+              className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Download size={18} />
-              Descargar / Guardar PNG
+              Descargar PNG
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-full sm:w-auto px-4 py-3 sm:py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-semibold"
+            >
+              Cerrar
             </button>
           </div>
         </div>
