@@ -262,6 +262,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         discountAmount: 0,
         subtotal: price,
         productCode: product.code,
+        shortCode: product.shortCode,
         barcode: product.barcode,
         size: product.size,
         color: product.color,
@@ -294,6 +295,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
     let product = products.find(
       (p) =>
+        (p.shortCode || '').trim() === code ||
         (p.barcode || '').trim() === code ||
         (p.code || '').trim().toLowerCase() ===
           code.toLowerCase(),
@@ -322,6 +324,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
     const exact = products.find(
       (product) =>
+        (product.shortCode || '').trim() === value ||
         (product.barcode || '').trim() === value ||
         (product.code || '').trim().toLowerCase() ===
           value.toLowerCase(),
@@ -671,6 +674,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         const searchable = [
           product.name,
           product.code,
+          product.shortCode,
           product.barcode,
           product.color,
           product.size,
@@ -867,7 +871,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                         {item.productName}
                       </div>
 
-                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-400">
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                        {item.shortCode && (
+                          <span className="font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded px-1.5 py-0.5">
+                            QR {item.shortCode}
+                          </span>
+                        )}
+
                         {item.productCode && (
                           <span className="font-mono">
                             {item.productCode}
@@ -1274,6 +1284,12 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                                             product.code
                                           }
                                         </div>
+                                        {product.shortCode && (
+                                          <div className="text-[11px] font-mono font-bold text-emerald-700">
+                                            QR {product.shortCode}
+                                          </div>
+                                        )}
+
                                         {product.barcode && (
                                           <div className="font-mono text-[10px] text-slate-400 mt-0.5">
                                             {
