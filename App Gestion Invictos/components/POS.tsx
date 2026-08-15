@@ -33,6 +33,7 @@ import {
   Barcode,
   PackagePlus,
   Shirt,
+  Megaphone,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
@@ -242,6 +243,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           item.productId === product.id
             ? normalizeCartItem(item, {
                 quantity: item.quantity + 1,
+                salesNote: product.salesNote,
               })
             : item,
         );
@@ -263,6 +265,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         barcode: product.barcode,
         size: product.size,
         color: product.color,
+        salesNote: product.salesNote,
       };
 
       return [...prev, newItem];
@@ -673,6 +676,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           product.size,
           product.category,
           product.provider,
+          product.salesNote,
         ]
           .filter(Boolean)
           .join(' ')
@@ -877,6 +881,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                           </span>
                         )}
                       </div>
+
+                      {item.salesNote && (
+                        <div className="mt-2 flex items-start gap-1.5 px-2.5 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold max-w-md">
+                          <Megaphone size={14} className="shrink-0 mt-0.5" />
+                          <span>{item.salesNote}</span>
+                        </div>
+                      )}
                     </td>
 
                     <td className="px-4 py-3 text-sm text-slate-600">
@@ -1232,6 +1243,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                                             product.category
                                           }
                                         </div>
+
+                                        {product.salesNote && (
+                                          <div className="mt-1 inline-flex items-start gap-1 px-2 py-1 rounded bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-semibold">
+                                            <Megaphone size={11} className="shrink-0 mt-0.5" />
+                                            <span>{product.salesNote}</span>
+                                          </div>
+                                        )}
                                       </td>
 
                                       <td className="px-3 py-2.5 text-sm text-slate-600">
