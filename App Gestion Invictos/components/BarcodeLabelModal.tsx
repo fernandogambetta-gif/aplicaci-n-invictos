@@ -6,6 +6,8 @@ import {
   Download,
   Share2,
   Image as ImageIcon,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { Product } from '../types';
 
@@ -99,8 +101,29 @@ const sanitizeFileName = (value: string): string =>
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
-    .slice(0, 80) || 'etiqueta';
+    .toLowerCase()
+    .slice(0, 100) || 'etiqueta';
+
+const buildLabelFileName = (
+  product: Product | null,
+  labelSize: LabelSize,
+): string => {
+  if (!product) return `etiqueta_${labelSize}.png`;
+
+  const parts = [
+    product.name,
+    product.color,
+    product.size ? `t_${product.size}` : '',
+    product.barcode || product.code,
+    labelSize,
+  ]
+    .filter(Boolean)
+    .map((part) => sanitizeFileName(String(part)));
+
+  return `${parts.join('_') || 'etiqueta'}.png`;
+};
 
 const wrapLines = (
   ctx: CanvasRenderingContext2D,
@@ -178,6 +201,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
   const [error, setError] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [isSharing, setIsSharing] = useState(false);
+  const [copiedName, setCopiedName] = useState(false);
 
   const barcodeValue = (
     product?.barcode ||
@@ -197,12 +221,10 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
     [copies],
   );
 
-  const fileName = useMemo(() => {
-    const baseName = sanitizeFileName(
-      product?.code || product?.name || 'etiqueta',
-    );
-    return `${baseName}_${labelSize}.png`;
-  }, [product?.code, product?.name, labelSize]);
+  const fileName = useMemo(
+    () => buildLabelFileName(product, labelSize),
+    [product, labelSize],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -223,6 +245,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
     setLabelSize('50x15');
     setError('');
     setPreviewUrl('');
+    setCopiedName(false);
   }, [open, product?.id, stockEntryQuantity]);
 
   useEffect(() => {
@@ -515,6 +538,16 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
     }
   };
 
+  const handleCopyFileName = async () => {
+    try {
+      await navigator.clipboard.writeText(fileName);
+      setCopiedName(true);
+      window.setTimeout(() => setCopiedName(false), 1800);
+    } catch {
+      setError('No se pudo copiar el nombre del archivo.');
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 z-[10020] flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full overflow-hidden">
@@ -751,7 +784,28 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                   className="shrink-0 mt-0.5"
                 />
                 <div>
-                  Este archivo se descarga como <strong>PNG</strong>. Luego podés abrir la app de NIIMBOT y subir la imagen para imprimirla desde el celular.
+                  Este archivo se descarga como <strong>PNG</strong>. En el celular podés usar <strong>Compartir / Guardar</strong> para mandarlo a Archivos, Drive, WhatsApp u otra app, y luego abrirlo/importarlo en NIIMBOT.
+                </div>
+              </div>
+
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                <div className="text-[11px] uppercase font-bold tracking-wide text-slate-500">
+                  Nombre del archivo
+                </div>
+
+                <div className="mt-1 flex items-start justify-between gap-3">
+                  <div className="font-mono text-sm text-slate-900 break-all">
+                    {fileName}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyFileName()}
+                    className="shrink-0 px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+                  >
+                    {copiedName ? <Check size={14} /> : <Copy size={14} />}
+                    {copiedName ? 'Copiado' : 'Copiar'}
+                  </button>
                 </div>
               </div>
             </>
@@ -785,7 +839,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
                   ) : (
                     <Share2 size={18} />
                   )}
-                  Compartir PNG
+                  Compartir / Guardar
                 </button>
               )}
 
@@ -796,7 +850,7 @@ const BarcodeLabelModal: React.FC<BarcodeLabelModalProps> = ({
               className="px-4 py-2 bg-slate-900 hover:bg-black text-white rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50"
             >
               <Download size={18} />
-              Descargar PNG
+              Descargar / Guardar PNG
             </button>
           </div>
         </div>
