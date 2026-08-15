@@ -79,6 +79,9 @@ export interface Product {
   gender?: string;
   description?: string;
 
+  // Aviso visible durante la venta: promociones, condiciones, advertencias, etc.
+  salesNote?: string;
+
   minStock?: number;
   active?: boolean;
   createdAt?: number;
@@ -119,6 +122,9 @@ export interface SaleItem {
   barcode?: string;
   size?: string;
   color?: string;
+
+  // Copia del aviso que tenía el producto al momento de la venta.
+  salesNote?: string;
 }
 
 export interface Sale {
