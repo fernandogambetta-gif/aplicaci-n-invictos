@@ -38,6 +38,7 @@ import {
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import VariantLookupModal from './VariantLookupModal';
+import SaleReceiptModal from './SaleReceiptModal';
 
 interface POSProps {
   products: Product[];
@@ -78,6 +79,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const [isScannerOpen, setIsScannerOpen] = useState(false);
   const [scanError, setScanError] = useState('');
   const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
+
+  // Última venta: permite generar ticket inmediatamente después de confirmar.
+  const [lastSale, setLastSale] = useState<Sale | null>(null);
+  const [isReceiptOpen, setIsReceiptOpen] = useState(false);
 
   const toNumber = (value: unknown, fallback = 0): number => {
     const n =
@@ -617,6 +622,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       };
 
       await StorageService.addSale(sale);
+
+      // Guardamos una copia local de la venta ya registrada para ticket/factura.
+      setLastSale(sale);
+      setIsReceiptOpen(true);
 
       setCart([]);
       setPaymentMethod('cash');
@@ -1648,6 +1657,17 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           setIsScannerOpen(false)
         }
         onDetected={handleBarcodeDetected}
+      />
+
+      <SaleReceiptModal
+        open={isReceiptOpen}
+        sale={lastSale}
+        onClose={() => setIsReceiptOpen(false)}
+        onRequestInvoice={() => {
+          alert(
+            'El botón Facturar ARCA ya quedó preparado. Para habilitar la emisión fiscal real falta configurar CUIT, condición fiscal, punto de venta y certificado digital ARCA.',
+          );
+        }}
       />
 
       {successMsg && (
