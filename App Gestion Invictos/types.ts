@@ -14,6 +14,11 @@ export interface User {
   pin: string;
   commissionPercentage?: number;
   security?: UserSecurity;
+
+  // Si el administrador blanqueó la clave, el usuario debe
+  // cambiar el PIN temporal al volver a ingresar.
+  mustChangePin?: boolean;
+  pinUpdatedAt?: number;
 }
 
 export interface AppConfig {
