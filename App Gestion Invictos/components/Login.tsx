@@ -190,7 +190,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
                       </div>
                       <div className="text-left">
                         <p className="font-bold text-slate-800">{user.name}</p>
-                        <p className="text-xs text-slate-500 uppercase">{user.role === 'admin' ? 'Dueño / Admin' : 'Vendedor'}</p>
+                        <p className="text-xs text-slate-500 uppercase">{user.role === 'admin' ? 'Administrador' : 'Vendedor'}</p>
                       </div>
                     </div>
 
