@@ -120,10 +120,11 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
 
     return (
       products.find((product) => {
+        const shortCode = (product.shortCode || '').trim().toLowerCase();
         const code = (product.code || '').trim().toLowerCase();
         const barcode = (product.barcode || '').trim().toLowerCase();
 
-        return code === term || barcode === term;
+        return shortCode === term || code === term || barcode === term;
       }) || null
     );
   };
@@ -173,6 +174,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
         .map((variant) =>
           [
             variant.name,
+            variant.shortCode,
             variant.code,
             variant.barcode,
             variant.size,
@@ -325,7 +327,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
                     }
                   }}
                   autoFocus
-                  placeholder="Nombre, SKU o código de barras..."
+                  placeholder="Nombre, código corto QR, SKU o código de barras..."
                   className="w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
@@ -335,7 +337,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
               </div>
 
               <div className="text-[11px] text-slate-400 mt-1">
-                También podés escribir o pegar el SKU / código interno o el código de barras y presionar Enter.
+                También podés escribir el código corto QR, el SKU o el código de barras y presionar Enter.
               </div>
             </div>
 
@@ -472,7 +474,10 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
                         </div>
 
                         <div className="text-xs text-slate-500 font-mono mt-1">
-                          SKU: {matchedVariant.code || '—'}
+                          QR: {matchedVariant.shortCode || '—'}
+                          {matchedVariant.code
+                            ? ` · SKU: ${matchedVariant.code}`
+                            : ''}
                           {matchedVariant.barcode
                             ? ` · Código de barras: ${matchedVariant.barcode}`
                             : ''}
@@ -712,6 +717,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
                               </div>
 
                               <div className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                {variant.shortCode ? `QR ${variant.shortCode} · ` : ''}
                                 {variant.code}
                                 {variant.barcode ? ` · ${variant.barcode}` : ''}
                               </div>
