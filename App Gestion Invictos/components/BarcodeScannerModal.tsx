@@ -1,11 +1,31 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, X, Loader2, Keyboard, AlertTriangle, ScanLine, Focus, ZoomIn } from 'lucide-react';
+import { Camera, X, Loader2, Keyboard, AlertTriangle, ScanLine, Focus, ZoomIn, ImagePlus } from 'lucide-react';
 
 interface BarcodeScannerModalProps {
   open: boolean;
   title?: string;
   onClose: () => void;
   onDetected: (code: string) => void | Promise<void>;
+}
+
+
+declare global {
+  interface Window {
+    jsQR?: (
+      data: Uint8ClampedArray,
+      width: number,
+      height: number,
+      options?: {
+        inversionAttempts?:
+          | 'dontInvert'
+          | 'onlyInvert'
+          | 'attemptBoth'
+          | 'invertFirst';
+      },
+    ) => {
+      data: string;
+    } | null;
+  }
 }
 
 const ZXING_URL = 'https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
@@ -52,6 +72,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const controlsRef = useRef<any>(null);
   const handledRef = useRef(false);
   const videoTrackRef = useRef<MediaStreamTrack | null>(null);
+  const photoInputRef = useRef<HTMLInputElement | null>(null);
 
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState('');
@@ -62,6 +83,8 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   const [zoomMin, setZoomMin] = useState(1);
   const [zoomMax, setZoomMax] = useState(1);
   const [focusMessage, setFocusMessage] = useState('');
+  const [isReadingPhoto, setIsReadingPhoto] = useState(false);
+  const [photoMessage, setPhotoMessage] = useState('');
 
   const stopScanner = () => {
     try {
@@ -75,6 +98,169 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     const stream = videoRef.current?.srcObject as MediaStream | null;
     stream?.getTracks().forEach((track) => track.stop());
     if (videoRef.current) videoRef.current.srcObject = null;
+  };
+
+  const loadJsQr = (): Promise<void> => {
+    if (window.jsQR) return Promise.resolve();
+
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[data-invictos-jsqr="true"]',
+    );
+
+    if (existing) {
+      return new Promise((resolve, reject) => {
+        if (window.jsQR) {
+          resolve();
+          return;
+        }
+
+        existing.addEventListener(
+          'load',
+          () => {
+            if (window.jsQR) resolve();
+            else reject(new Error('El lector QR cargó pero no quedó disponible.'));
+          },
+          { once: true },
+        );
+
+        existing.addEventListener(
+          'error',
+          () => reject(new Error('No se pudo cargar el lector de QR para fotos.')),
+          { once: true },
+        );
+      });
+    }
+
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src =
+        'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
+      script.async = true;
+      script.dataset.invictosJsqr = 'true';
+
+      script.onload = () => {
+        if (window.jsQR) resolve();
+        else reject(new Error('No se pudo inicializar el lector QR para fotos.'));
+      };
+
+      script.onerror = () =>
+        reject(new Error('No se pudo cargar el lector QR para fotos.'));
+
+      document.head.appendChild(script);
+    });
+  };
+
+  const readQrFromPhoto = async (file: File) => {
+    if (!file) return;
+
+    setPhotoMessage('');
+    setIsReadingPhoto(true);
+
+    try {
+      await loadJsQr();
+
+      if (!window.jsQR) {
+        throw new Error('No se pudo inicializar el lector QR.');
+      }
+
+      const objectUrl = URL.createObjectURL(file);
+
+      try {
+        const image = new Image();
+
+        await new Promise<void>((resolve, reject) => {
+          image.onload = () => resolve();
+          image.onerror = () =>
+            reject(new Error('No se pudo abrir la foto tomada.'));
+          image.src = objectUrl;
+        });
+
+        /*
+         * Trabajamos a buena resolución pero limitamos imágenes gigantes
+         * para no bloquear celulares con fotos de 12/50 MP.
+         */
+        const maxSide = 2200;
+        const scale = Math.min(
+          1,
+          maxSide / Math.max(image.naturalWidth, image.naturalHeight),
+        );
+
+        const width = Math.max(1, Math.round(image.naturalWidth * scale));
+        const height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext('2d', {
+          willReadFrequently: true,
+        });
+
+        if (!ctx) {
+          throw new Error('No se pudo analizar la fotografía.');
+        }
+
+        ctx.drawImage(image, 0, 0, width, height);
+
+        const imageData = ctx.getImageData(0, 0, width, height);
+
+        let result = window.jsQR(
+          imageData.data,
+          width,
+          height,
+          { inversionAttempts: 'attemptBoth' },
+        );
+
+        /*
+         * Si no aparece en la imagen completa, probamos también un recorte
+         * central ampliado. Es útil cuando el QR ocupa una parte chica de la foto.
+         */
+        if (!result) {
+          const cropSize = Math.round(Math.min(width, height) * 0.72);
+          const cropX = Math.max(0, Math.round((width - cropSize) / 2));
+          const cropY = Math.max(0, Math.round((height - cropSize) / 2));
+
+          const cropData = ctx.getImageData(
+            cropX,
+            cropY,
+            cropSize,
+            cropSize,
+          );
+
+          result = window.jsQR(
+            cropData.data,
+            cropSize,
+            cropSize,
+            { inversionAttempts: 'attemptBoth' },
+          );
+        }
+
+        const detected = (result?.data || '').trim();
+
+        if (!detected) {
+          setPhotoMessage(
+            'No pude detectar el QR en la foto. Acercate hasta que el QR se vea nítido, tocá sobre él para enfocar y sacá otra foto.',
+          );
+          return;
+        }
+
+        setPhotoMessage(`QR leído: ${detected}`);
+        await emitCode(detected);
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    } catch (error: any) {
+      console.error('Error leyendo QR desde foto:', error);
+      setPhotoMessage(
+        error?.message || 'No se pudo leer el QR de la fotografía.',
+      );
+    } finally {
+      setIsReadingPhoto(false);
+
+      if (photoInputRef.current) {
+        photoInputRef.current.value = '';
+      }
+    }
   };
 
   const applyCameraEnhancements = async (
@@ -257,6 +443,8 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     setZoomMin(1);
     setZoomMax(1);
     setFocusMessage('');
+    setIsReadingPhoto(false);
+    setPhotoMessage('');
 
     const start = async () => {
       try {
@@ -348,7 +536,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               <Camera size={20} className="text-indigo-600" />
               {title}
             </h3>
-            <p className="text-xs text-slate-500 mt-0.5">Apuntá al QR y mantené el teléfono un poco alejado. El lector intentará enfocar y ampliar automáticamente.</p>
+            <p className="text-xs text-slate-500 mt-0.5">Para etiquetas pequeñas, usá preferentemente “Tomar foto del QR”. La cámara nativa del celular puede enfocar mucho mejor.</p>
           </div>
           <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-slate-200 text-slate-500">
             <X size={20} />
@@ -356,6 +544,74 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         </div>
 
         <div className="p-5 space-y-4">
+          <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                <ImagePlus size={20} />
+              </div>
+
+              <div className="flex-1">
+                <div className="font-bold text-emerald-900">
+                  Recomendado: tomar foto del QR
+                </div>
+
+                <p className="text-xs text-emerald-700 mt-1">
+                  Usa la cámara nativa del teléfono, que enfoca mucho mejor que la cámara dentro del navegador.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={() => photoInputRef.current?.click()}
+                  disabled={isReadingPhoto}
+                  className="mt-3 w-full px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {isReadingPhoto ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <Camera size={18} />
+                  )}
+
+                  {isReadingPhoto ? 'Leyendo foto…' : 'Tomar foto del QR'}
+                </button>
+
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+
+                    if (file) {
+                      void readQrFromPhoto(file);
+                    }
+                  }}
+                />
+
+                {photoMessage && (
+                  <div
+                    className={`mt-2 text-xs rounded-lg px-3 py-2 ${
+                      photoMessage.startsWith('QR leído:')
+                        ? 'bg-white text-emerald-700 border border-emerald-200'
+                        : 'bg-amber-50 text-amber-800 border border-amber-200'
+                    }`}
+                  >
+                    {photoMessage}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="relative flex items-center gap-3 py-1">
+            <div className="h-px bg-slate-200 flex-1" />
+            <span className="text-[11px] uppercase font-bold tracking-wide text-slate-400">
+              o lector en vivo
+            </span>
+            <div className="h-px bg-slate-200 flex-1" />
+          </div>
+
           <div
             className="relative bg-black rounded-xl overflow-hidden aspect-[4/3] flex items-center justify-center"
             onClick={() => void forceFocus()}
