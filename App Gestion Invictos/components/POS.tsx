@@ -1664,9 +1664,22 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         sale={lastSale}
         onClose={() => setIsReceiptOpen(false)}
         onRequestInvoice={() => {
-          alert(
-            'El botón Facturar ARCA ya quedó preparado. Para habilitar la emisión fiscal real falta configurar CUIT, condición fiscal, punto de venta y certificado digital ARCA.',
+          // Acceso oficial de ARCA a "Comprobantes en línea".
+          // Se abre en otra pestaña para mantener INVICTOS abierto.
+          const arcaUrl =
+            'https://auth.afip.gob.ar/contribuyente_/login.xhtml?action=SYSTEM&system=rcel';
+
+          const arcaWindow = window.open(
+            arcaUrl,
+            '_blank',
+            'noopener,noreferrer',
           );
+
+          // En caso de que el navegador bloquee la nueva pestaña,
+          // abrimos ARCA en la pestaña actual.
+          if (!arcaWindow) {
+            window.location.href = arcaUrl;
+          }
         }}
       />
 
