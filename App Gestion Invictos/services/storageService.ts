@@ -137,31 +137,96 @@ export const StorageService = {
   },
 
   // ================= SECURITY =================
+  /**
+   * Seguridad de PIN:
+   * - 1er error: quedan 2 intentos.
+   * - 2do error: queda 1 intento.
+   * - 3er error: bloqueo temporal por 5 minutos.
+   * - terminado el bloqueo, vuelve a disponer de 3 intentos.
+   *
+   * No genera nuevos bloqueos permanentes automáticos.
+   * La operación es atómica mediante transacción de Firestore.
+   */
   recordFailedAttempt: async (userId: string): Promise<User | null> => {
     if (!db) throw new Error('Firestore no inicializado');
 
     const userRef = doc(db, COLLECTIONS.USERS, userId);
-    const users = await StorageService.getUsers();
-    const user = users.find((u) => u.id === userId);
 
-    if (!user) return null;
+    return runTransaction(db, async (transaction) => {
+      const userSnap = await transaction.get(userRef);
 
-    user.security = user.security || { ...DEFAULT_SECURITY };
-    user.security.failedAttempts += 1;
+      if (!userSnap.exists()) return null;
 
-    if (user.security.failedAttempts >= 3) {
-      user.security.lockoutUntil = Date.now() + 5 * 60 * 1000;
-      user.security.consecutiveLockouts += 1;
-      user.security.failedAttempts = 0;
+      const user = {
+        ...(userSnap.data() as User),
+        id: userSnap.id,
+      };
 
-      if (user.security.consecutiveLockouts >= 3) {
-        user.security.isPermanentlyBlocked = true;
-        user.security.lockoutUntil = null;
+      const now = Date.now();
+
+      const currentSecurity: UserSecurity = {
+        ...DEFAULT_SECURITY,
+        ...(user.security || {}),
+      };
+
+      // Conservamos un bloqueo permanente antiguo hasta que un admin lo quite.
+      if (currentSecurity.isPermanentlyBlocked) {
+        return {
+          ...user,
+          security: currentSecurity,
+        };
       }
-    }
 
-    await updateDoc(userRef, { security: cleanData(user.security) });
-    return user;
+      // Si todavía está dentro de los 5 minutos, no sumamos intentos.
+      if (
+        currentSecurity.lockoutUntil &&
+        currentSecurity.lockoutUntil > now
+      ) {
+        return {
+          ...user,
+          security: currentSecurity,
+        };
+      }
+
+      // Si había un bloqueo temporal ya vencido, comenzamos un ciclo nuevo.
+      const previousAttempts =
+        currentSecurity.lockoutUntil &&
+        currentSecurity.lockoutUntil <= now
+          ? 0
+          : Number(currentSecurity.failedAttempts || 0);
+
+      const nextAttempts = previousAttempts + 1;
+
+      let nextSecurity: UserSecurity;
+
+      if (nextAttempts >= 3) {
+        nextSecurity = {
+          ...currentSecurity,
+          failedAttempts: 0,
+          lockoutUntil: now + 5 * 60 * 1000,
+          // Ya no acumulamos ciclos para bloquear permanentemente.
+          consecutiveLockouts: 0,
+          isPermanentlyBlocked: false,
+        };
+      } else {
+        nextSecurity = {
+          ...currentSecurity,
+          failedAttempts: nextAttempts,
+          lockoutUntil: null,
+          consecutiveLockouts: 0,
+          isPermanentlyBlocked: false,
+        };
+      }
+
+      transaction.update(userRef, {
+        security: cleanData(nextSecurity),
+      });
+
+      return {
+        ...user,
+        security: nextSecurity,
+      };
+    });
   },
 
   resetAttempts: async (userId: string) => {
