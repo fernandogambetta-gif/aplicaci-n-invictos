@@ -1,5 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, X, Loader2, Keyboard, AlertTriangle, ScanLine, Focus, ZoomIn, ImagePlus } from 'lucide-react';
+import {
+  Camera,
+  X,
+  Loader2,
+  Keyboard,
+  ScanLine,
+  Focus,
+  ZoomIn,
+  RefreshCw,
+  VideoOff,
+} from 'lucide-react';
 
 interface BarcodeScannerModalProps {
   open: boolean;
@@ -8,9 +18,18 @@ interface BarcodeScannerModalProps {
   onDetected: (code: string) => void | Promise<void>;
 }
 
-
 declare global {
   interface Window {
+    BarcodeDetector?: new (options?: {
+      formats?: string[];
+    }) => {
+      detect: (source: HTMLVideoElement) => Promise<
+        Array<{
+          rawValue?: string;
+        }>
+      >;
+    };
+
     jsQR?: (
       data: Uint8ClampedArray,
       width: number,
@@ -28,422 +47,142 @@ declare global {
   }
 }
 
-const ZXING_URL = 'https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js';
-let zxingLoader: Promise<any> | null = null;
+const loadJsQr = (): Promise<void> => {
+  if (window.jsQR) return Promise.resolve();
 
-const loadZXing = (): Promise<any> => {
-  const existing = (window as any).ZXingBrowser;
-  if (existing) return Promise.resolve(existing);
+  const existing = document.querySelector<HTMLScriptElement>(
+    'script[data-invictos-jsqr-live="true"]',
+  );
 
-  if (zxingLoader) return zxingLoader;
+  if (existing) {
+    return new Promise((resolve, reject) => {
+      if (window.jsQR) {
+        resolve();
+        return;
+      }
 
-  zxingLoader = new Promise((resolve, reject) => {
-    const previous = document.querySelector(`script[src="${ZXING_URL}"]`) as HTMLScriptElement | null;
+      existing.addEventListener(
+        'load',
+        () => {
+          if (window.jsQR) resolve();
+          else reject(new Error('El lector QR no quedó disponible.'));
+        },
+        { once: true },
+      );
 
-    if (previous) {
-      previous.addEventListener('load', () => resolve((window as any).ZXingBrowser), { once: true });
-      previous.addEventListener('error', () => reject(new Error('No se pudo cargar el lector de códigos.')), { once: true });
-      return;
-    }
+      existing.addEventListener(
+        'error',
+        () => reject(new Error('No se pudo cargar el lector QR.')),
+        { once: true },
+      );
+    });
+  }
 
+  return new Promise((resolve, reject) => {
     const script = document.createElement('script');
-    script.src = ZXING_URL;
+    script.src =
+      'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
     script.async = true;
-    script.crossOrigin = 'anonymous';
+    script.dataset.invictosJsqrLive = 'true';
+
     script.onload = () => {
-      const zxing = (window as any).ZXingBrowser;
-      if (zxing) resolve(zxing);
-      else reject(new Error('El lector de códigos no quedó disponible.'));
+      if (window.jsQR) resolve();
+      else reject(new Error('No se pudo inicializar el lector QR.'));
     };
-    script.onerror = () => reject(new Error('No se pudo cargar el lector de códigos.'));
+
+    script.onerror = () =>
+      reject(new Error('No se pudo cargar el lector QR.'));
+
     document.head.appendChild(script);
   });
-
-  return zxingLoader;
 };
 
 const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
   open,
-  title = 'Escanear código de barras',
+  title = 'Escanear QR',
   onClose,
   onDetected,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const controlsRef = useRef<any>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const scanTimerRef = useRef<number | null>(null);
+  const scanningRef = useRef(false);
   const handledRef = useRef(false);
-  const videoTrackRef = useRef<MediaStreamTrack | null>(null);
-  const photoInputRef = useRef<HTMLInputElement | null>(null);
+  const detectorRef = useRef<any>(null);
+  const fallbackCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [status, setStatus] = useState<
+    'idle' | 'loading' | 'ready' | 'error'
+  >('idle');
+
   const [errorMessage, setErrorMessage] = useState('');
   const [manualCode, setManualCode] = useState('');
-  const [focusSupported, setFocusSupported] = useState(false);
+  const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
   const [zoomSupported, setZoomSupported] = useState(false);
-  const [zoomValue, setZoomValue] = useState(1);
   const [zoomMin, setZoomMin] = useState(1);
   const [zoomMax, setZoomMax] = useState(1);
-  const [focusMessage, setFocusMessage] = useState('');
-  const [isReadingPhoto, setIsReadingPhoto] = useState(false);
-  const [photoMessage, setPhotoMessage] = useState('');
+  const [zoomValue, setZoomValue] = useState(1);
+  const [cameraMessage, setCameraMessage] = useState('');
 
-  const stopScanner = () => {
-    try {
-      controlsRef.current?.stop?.();
-    } catch {
-      // noop
+  const stopCamera = () => {
+    if (scanTimerRef.current !== null) {
+      window.clearTimeout(scanTimerRef.current);
+      scanTimerRef.current = null;
     }
-    controlsRef.current = null;
-    videoTrackRef.current = null;
 
-    const stream = videoRef.current?.srcObject as MediaStream | null;
-    stream?.getTracks().forEach((track) => track.stop());
-    if (videoRef.current) videoRef.current.srcObject = null;
+    scanningRef.current = false;
+    detectorRef.current = null;
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+
+    if (fallbackCanvasRef.current) {
+      fallbackCanvasRef.current.width = 1;
+      fallbackCanvasRef.current.height = 1;
+    }
+
+    setZoomSupported(false);
   };
 
-  const loadJsQr = (): Promise<void> => {
-    if (window.jsQR) return Promise.resolve();
+  const emitCode = async (rawCode: string) => {
+    const code = (rawCode || '').trim();
 
-    const existing = document.querySelector<HTMLScriptElement>(
-      'script[data-invictos-jsqr="true"]',
-    );
+    if (!code || handledRef.current) return;
 
-    if (existing) {
-      return new Promise((resolve, reject) => {
-        if (window.jsQR) {
-          resolve();
-          return;
-        }
-
-        existing.addEventListener(
-          'load',
-          () => {
-            if (window.jsQR) resolve();
-            else reject(new Error('El lector QR cargó pero no quedó disponible.'));
-          },
-          { once: true },
-        );
-
-        existing.addEventListener(
-          'error',
-          () => reject(new Error('No se pudo cargar el lector de QR para fotos.')),
-          { once: true },
-        );
-      });
-    }
-
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src =
-        'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js';
-      script.async = true;
-      script.dataset.invictosJsqr = 'true';
-
-      script.onload = () => {
-        if (window.jsQR) resolve();
-        else reject(new Error('No se pudo inicializar el lector QR para fotos.'));
-      };
-
-      script.onerror = () =>
-        reject(new Error('No se pudo cargar el lector QR para fotos.'));
-
-      document.head.appendChild(script);
-    });
-  };
-
-  const readImageDimensions = async (
-    file: File,
-  ): Promise<{ width: number; height: number } | null> => {
-    /*
-     * Leemos solo los primeros 256 KB del archivo.
-     * Esto permite conocer las dimensiones de JPEG/PNG sin decodificar
-     * una foto de 12/50 MP completa en memoria.
-     */
-    const header = await file.slice(0, 256 * 1024).arrayBuffer();
-    const view = new DataView(header);
-
-    // PNG
-    if (
-      header.byteLength >= 24 &&
-      view.getUint32(0, false) === 0x89504e47 &&
-      view.getUint32(4, false) === 0x0d0a1a0a
-    ) {
-      return {
-        width: view.getUint32(16, false),
-        height: view.getUint32(20, false),
-      };
-    }
-
-    // JPEG
-    if (
-      header.byteLength >= 4 &&
-      view.getUint16(0, false) === 0xffd8
-    ) {
-      let offset = 2;
-
-      while (offset + 9 < header.byteLength) {
-        if (view.getUint8(offset) !== 0xff) {
-          offset += 1;
-          continue;
-        }
-
-        const marker = view.getUint8(offset + 1);
-        offset += 2;
-
-        // Marcadores sin longitud
-        if (
-          marker === 0xd8 ||
-          marker === 0xd9 ||
-          (marker >= 0xd0 && marker <= 0xd7)
-        ) {
-          continue;
-        }
-
-        if (offset + 2 > header.byteLength) break;
-
-        const length = view.getUint16(offset, false);
-
-        const isSof =
-          marker === 0xc0 ||
-          marker === 0xc1 ||
-          marker === 0xc2 ||
-          marker === 0xc3 ||
-          marker === 0xc5 ||
-          marker === 0xc6 ||
-          marker === 0xc7 ||
-          marker === 0xc9 ||
-          marker === 0xca ||
-          marker === 0xcb ||
-          marker === 0xcd ||
-          marker === 0xce ||
-          marker === 0xcf;
-
-        if (isSof && offset + 7 < header.byteLength) {
-          return {
-            height: view.getUint16(offset + 3, false),
-            width: view.getUint16(offset + 5, false),
-          };
-        }
-
-        if (length < 2) break;
-        offset += length;
-      }
-    }
-
-    return null;
-  };
-
-  const readQrFromPhoto = async (file: File) => {
-    if (!file) return;
-
-    setPhotoMessage('');
-    setIsReadingPhoto(true);
-
-    let bitmap: ImageBitmap | null = null;
+    handledRef.current = true;
+    stopCamera();
 
     try {
-      await loadJsQr();
-
-      if (!window.jsQR) {
-        throw new Error('No se pudo inicializar el lector QR.');
-      }
-
-      /*
-       * IMPORTANTE:
-       * No abrimos una copia completa de la fotografía.
-       * Primero averiguamos dimensiones leyendo unos pocos KB y luego
-       * pedimos createImageBitmap directamente a tamaño reducido.
-       */
-      if (typeof createImageBitmap !== 'function') {
-        throw new Error(
-          'Este navegador no permite procesar la foto de forma segura. Usá el lector en vivo o escribí el código corto.',
-        );
-      }
-
-      const dimensions = await readImageDimensions(file);
-
-      // Si no pudimos conocerlas, usamos un tamaño cuadrado pequeño.
-      const originalWidth = Math.max(1, dimensions?.width || 1200);
-      const originalHeight = Math.max(1, dimensions?.height || 1200);
-
-      // 900 px de lado máximo: suficiente para QR y muy liviano en memoria.
-      const targetMaxSide = 900;
-      const scale = Math.min(
-        1,
-        targetMaxSide / Math.max(originalWidth, originalHeight),
-      );
-
-      const targetWidth = Math.max(
-        1,
-        Math.round(originalWidth * scale),
-      );
-      const targetHeight = Math.max(
-        1,
-        Math.round(originalHeight * scale),
-      );
-
-      /*
-       * Esta es la diferencia fundamental:
-       * el navegador recibe YA las dimensiones reducidas que debe producir.
-       * No creamos antes un ImageBitmap de resolución completa.
-       */
-      bitmap = await createImageBitmap(file, {
-        imageOrientation: 'from-image',
-        resizeWidth: targetWidth,
-        resizeHeight: targetHeight,
-        resizeQuality: 'medium',
-      });
-
-      const width = bitmap.width;
-      const height = bitmap.height;
-
-      /*
-       * Primero analizamos el centro, donde se supone que el usuario
-       * encuadra el QR. Esto reduce todavía más la memoria necesaria.
-       */
-      const cropSize = Math.max(
-        1,
-        Math.round(Math.min(width, height) * 0.84),
-      );
-
-      const cropX = Math.max(
-        0,
-        Math.round((width - cropSize) / 2),
-      );
-
-      const cropY = Math.max(
-        0,
-        Math.round((height - cropSize) / 2),
-      );
-
-      const canvas = document.createElement('canvas');
-      canvas.width = cropSize;
-      canvas.height = cropSize;
-
-      const ctx = canvas.getContext('2d', {
-        willReadFrequently: true,
-      });
-
-      if (!ctx) {
-        throw new Error('No se pudo analizar la fotografía.');
-      }
-
-      ctx.drawImage(
-        bitmap,
-        cropX,
-        cropY,
-        cropSize,
-        cropSize,
-        0,
-        0,
-        cropSize,
-        cropSize,
-      );
-
-      let centerData = ctx.getImageData(
-        0,
-        0,
-        cropSize,
-        cropSize,
-      );
-
-      let result = window.jsQR(
-        centerData.data,
-        cropSize,
-        cropSize,
-        {
-          // Primero el intento menos costoso.
-          inversionAttempts: 'dontInvert',
-        },
-      );
-
-      centerData = null as any;
-
-      /*
-       * Segundo intento:
-       * solo si no apareció en el centro, analizamos la imagen reducida
-       * completa. Nunca la fotografía original.
-       */
-      if (!result) {
-        canvas.width = width;
-        canvas.height = height;
-
-        ctx.drawImage(bitmap, 0, 0, width, height);
-
-        let fullData = ctx.getImageData(
-          0,
-          0,
-          width,
-          height,
-        );
-
-        result = window.jsQR(
-          fullData.data,
-          width,
-          height,
-          {
-            inversionAttempts: 'attemptBoth',
-          },
-        );
-
-        fullData = null as any;
-      }
-
-      // Liberación inmediata.
-      bitmap.close();
-      bitmap = null;
-
-      canvas.width = 1;
-      canvas.height = 1;
-
-      const detected = (result?.data || '').trim();
-
-      if (!detected) {
-        setPhotoMessage(
-          'No pude detectar el QR. Sacá la foto con el QR centrado, nítido y ocupando una parte importante de la pantalla.',
-        );
-        return;
-      }
-
-      setPhotoMessage(`QR leído: ${detected}`);
-      await emitCode(detected);
-    } catch (error: any) {
-      console.error('Error leyendo QR desde foto:', error);
-
-      const message = String(error?.message || '');
-
-      if (
-        /memory|memoria|allocation|out of/i.test(message)
-      ) {
-        setPhotoMessage(
-          'El teléfono rechazó el procesamiento por memoria. No volveré a intentar con la foto completa. Usá el lector en vivo o escribí el código corto.',
-        );
-      } else {
-        setPhotoMessage(
-          message || 'No se pudo leer el QR de la fotografía.',
-        );
-      }
+      await onDetected(code);
     } finally {
-      if (bitmap) {
-        try {
-          bitmap.close();
-        } catch {
-          // Sin acción.
-        }
-      }
-
-      setIsReadingPhoto(false);
-
-      if (photoInputRef.current) {
-        photoInputRef.current.value = '';
-      }
+      onClose();
     }
   };
 
+  const refreshDevices = async () => {
+    try {
+      const all = await navigator.mediaDevices.enumerateDevices();
+      const cameras = all.filter((device) => device.kind === 'videoinput');
 
-  const applyCameraEnhancements = async (
-    track: MediaStreamTrack,
-    initial = false,
-  ) => {
+      setDevices(cameras);
+
+      if (!selectedDeviceId && cameras.length === 1) {
+        setSelectedDeviceId(cameras[0].deviceId);
+      }
+    } catch (error) {
+      console.debug('No se pudieron enumerar cámaras:', error);
+    }
+  };
+
+  const configureTrack = async (track: MediaStreamTrack) => {
     try {
       const capabilities =
         typeof track.getCapabilities === 'function'
@@ -456,15 +195,8 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         ? capabilities.focusMode
         : [];
 
-      const canContinuousFocus = focusModes.includes('continuous');
-      const canSingleFocus = focusModes.includes('single-shot');
-
-      setFocusSupported(canContinuousFocus || canSingleFocus);
-
-      if (canContinuousFocus) {
+      if (focusModes.includes('continuous')) {
         advanced.push({ focusMode: 'continuous' });
-      } else if (canSingleFocus) {
-        advanced.push({ focusMode: 'single-shot' });
       }
 
       const zoomCapability = capabilities.zoom;
@@ -472,23 +204,19 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       if (
         zoomCapability &&
         Number.isFinite(Number(zoomCapability.min)) &&
-        Number.isFinite(Number(zoomCapability.max))
+        Number.isFinite(Number(zoomCapability.max)) &&
+        Number(zoomCapability.max) > Number(zoomCapability.min)
       ) {
         const min = Number(zoomCapability.min);
         const max = Number(zoomCapability.max);
-        const target = Math.min(
-          max,
-          Math.max(min, initial ? 2 : zoomValue),
-        );
+        const initial = Math.min(max, Math.max(min, 1.7));
 
-        setZoomSupported(max > min);
+        setZoomSupported(true);
         setZoomMin(min);
         setZoomMax(max);
-        setZoomValue(target);
+        setZoomValue(initial);
 
-        if (max > min) {
-          advanced.push({ zoom: target });
-        }
+        advanced.push({ zoom: initial });
       } else {
         setZoomSupported(false);
       }
@@ -498,29 +226,13 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           advanced,
         } as any);
       }
-
-      if (initial) {
-        setFocusMessage(
-          canContinuousFocus
-            ? 'Autofoco continuo activado.'
-            : canSingleFocus
-              ? 'Enfoque automático activado.'
-              : 'La cámara no informa control manual de foco.',
-        );
-      }
     } catch (error) {
-      console.debug('No se pudieron aplicar mejoras de cámara:', error);
-
-      if (initial) {
-        setFocusMessage(
-          'La cámara está activa, pero el navegador no permitió controlar el foco.',
-        );
-      }
+      console.debug('La cámara no permitió ajustes extra:', error);
     }
   };
 
   const forceFocus = async () => {
-    const track = videoTrackRef.current;
+    const track = streamRef.current?.getVideoTracks?.()[0];
     if (!track) return;
 
     try {
@@ -529,384 +241,576 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
           ? (track.getCapabilities() as any)
           : {};
 
-      const focusModes: string[] = Array.isArray(capabilities.focusMode)
+      const modes: string[] = Array.isArray(capabilities.focusMode)
         ? capabilities.focusMode
         : [];
 
-      if (focusModes.includes('single-shot')) {
+      if (modes.includes('single-shot')) {
         await track.applyConstraints({
           advanced: [{ focusMode: 'single-shot' }],
         } as any);
 
-        window.setTimeout(() => {
-          void track
-            .applyConstraints({
-              advanced: [
-                {
-                  focusMode: focusModes.includes('continuous')
-                    ? 'continuous'
-                    : 'single-shot',
-                },
-              ],
-            } as any)
-            .catch(() => undefined);
-        }, 600);
+        setCameraMessage('Reenfocando… mantené el QR quieto.');
 
-        setFocusMessage('Reenfocando… mantené el QR quieto.');
-      } else if (focusModes.includes('continuous')) {
+        window.setTimeout(() => {
+          if (!streamRef.current) return;
+
+          if (modes.includes('continuous')) {
+            void track
+              .applyConstraints({
+                advanced: [{ focusMode: 'continuous' }],
+              } as any)
+              .catch(() => undefined);
+          }
+        }, 700);
+
+        return;
+      }
+
+      if (modes.includes('continuous')) {
         await track.applyConstraints({
           advanced: [{ focusMode: 'continuous' }],
         } as any);
 
-        setFocusMessage('Autofoco continuo reactivado.');
-      } else {
-        setFocusMessage(
-          'Este navegador no permite forzar el foco. Alejá un poco el teléfono y usá zoom.',
-        );
+        setCameraMessage('Autofoco continuo reactivado.');
+        return;
       }
-    } catch (error) {
-      console.debug('Error forzando foco:', error);
-      setFocusMessage(
-        'No se pudo forzar el foco. Probá alejando el teléfono unos centímetros.',
+
+      setCameraMessage(
+        'Esta lente no permite controlar el foco. Probá otra cámara trasera.',
+      );
+    } catch {
+      setCameraMessage(
+        'No se pudo forzar el foco. Probá cambiar de cámara.',
       );
     }
   };
 
-  const changeZoom = async (nextZoom: number) => {
-    const track = videoTrackRef.current;
+  const changeZoom = async (value: number) => {
+    const track = streamRef.current?.getVideoTracks?.()[0];
     if (!track) return;
 
-    const value = Math.min(zoomMax, Math.max(zoomMin, nextZoom));
-    setZoomValue(value);
+    const safe = Math.min(zoomMax, Math.max(zoomMin, value));
+    setZoomValue(safe);
 
     try {
       await track.applyConstraints({
-        advanced: [{ zoom: value }],
+        advanced: [{ zoom: safe }],
       } as any);
-    } catch (error) {
-      console.debug('No se pudo cambiar zoom:', error);
+    } catch {
+      // No hacemos fallar el lector por zoom.
     }
   };
 
-  const emitCode = async (rawCode: string) => {
-    const code = rawCode.trim();
-    if (!code || handledRef.current) return;
+  const scanWithJsQr = async (): Promise<string> => {
+    const video = videoRef.current;
 
-    handledRef.current = true;
-    stopScanner();
+    if (
+      !video ||
+      video.readyState < 2 ||
+      video.videoWidth <= 0 ||
+      video.videoHeight <= 0
+    ) {
+      return '';
+    }
+
+    await loadJsQr();
+
+    if (!window.jsQR) return '';
+
+    let canvas = fallbackCanvasRef.current;
+
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      fallbackCanvasRef.current = canvas;
+    }
+
+    // Muy liviano: nunca procesamos más de 480 px de ancho.
+    const targetWidth = Math.min(480, video.videoWidth);
+    const scale = targetWidth / video.videoWidth;
+    const targetHeight = Math.max(
+      1,
+      Math.round(video.videoHeight * scale),
+    );
+
+    if (
+      canvas.width !== targetWidth ||
+      canvas.height !== targetHeight
+    ) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
+
+    const ctx = canvas.getContext('2d', {
+      willReadFrequently: true,
+    });
+
+    if (!ctx) return '';
+
+    ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+    const image = ctx.getImageData(
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+
+    const result = window.jsQR(
+      image.data,
+      targetWidth,
+      targetHeight,
+      {
+        inversionAttempts: 'dontInvert',
+      },
+    );
+
+    return (result?.data || '').trim();
+  };
+
+  const scheduleScan = () => {
+    if (!streamRef.current || handledRef.current) return;
+
+    scanTimerRef.current = window.setTimeout(async () => {
+      if (
+        scanningRef.current ||
+        !streamRef.current ||
+        handledRef.current
+      ) {
+        scheduleScan();
+        return;
+      }
+
+      scanningRef.current = true;
+
+      try {
+        let detected = '';
+
+        if (detectorRef.current && videoRef.current) {
+          const results = await detectorRef.current.detect(videoRef.current);
+          detected = (results?.[0]?.rawValue || '').trim();
+        } else {
+          detected = await scanWithJsQr();
+        }
+
+        if (detected) {
+          await emitCode(detected);
+          return;
+        }
+      } catch (error) {
+        console.debug('Lectura QR:', error);
+      } finally {
+        scanningRef.current = false;
+      }
+
+      scheduleScan();
+    }, 300);
+  };
+
+  const buildDetector = () => {
+    try {
+      if (typeof window.BarcodeDetector === 'function') {
+        try {
+          detectorRef.current = new window.BarcodeDetector({
+            formats: ['qr_code', 'ean_13', 'ean_8', 'code_128'],
+          });
+        } catch {
+          detectorRef.current = new window.BarcodeDetector();
+        }
+
+        setCameraMessage(
+          'Usando el lector nativo del navegador, con menor consumo de memoria.',
+        );
+        return;
+      }
+    } catch {
+      // fallback debajo
+    }
+
+    detectorRef.current = null;
+    setCameraMessage(
+      'Este navegador usará el lector QR liviano de respaldo.',
+    );
+  };
+
+  const startCamera = async (deviceId?: string) => {
+    stopCamera();
+    handledRef.current = false;
+
+    setStatus('loading');
+    setErrorMessage('');
+    setCameraMessage('');
 
     try {
-      if ('vibrate' in navigator) navigator.vibrate?.(120);
-      await Promise.resolve(onDetected(code));
-      onClose();
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Este navegador no permite usar la cámara.');
+      }
+
+      const videoConstraints: MediaTrackConstraints = deviceId
+        ? {
+            deviceId: { exact: deviceId },
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+          }
+        : {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 960, max: 1280 },
+            height: { ideal: 540, max: 720 },
+          };
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: videoConstraints,
+      });
+
+      streamRef.current = stream;
+
+      const video = videoRef.current;
+
+      if (!video) {
+        stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+        throw new Error('No se pudo iniciar la vista de cámara.');
+      }
+
+      video.srcObject = stream;
+      await video.play();
+
+      const track = stream.getVideoTracks()[0];
+
+      if (track) {
+        await configureTrack(track);
+
+        const settings = track.getSettings?.();
+        if (settings?.deviceId) {
+          setSelectedDeviceId(settings.deviceId);
+        }
+      }
+
+      await refreshDevices();
+      buildDetector();
+
+      setStatus('ready');
+      scheduleScan();
     } catch (error: any) {
-      handledRef.current = false;
+      console.error('Error abriendo cámara:', error);
+      stopCamera();
       setStatus('error');
-      setErrorMessage(error?.message || 'No se pudo procesar el código leído.');
+
+      const message = String(error?.message || '');
+
+      if (/permission|notallowed/i.test(message)) {
+        setErrorMessage(
+          'No se otorgó permiso para usar la cámara.',
+        );
+      } else {
+        setErrorMessage(
+          message || 'No se pudo abrir la cámara.',
+        );
+      }
     }
   };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      stopCamera();
+      return;
+    }
 
-    let cancelled = false;
+    // Importante: NO abrimos la cámara automáticamente.
+    // Esto evita reservar memoria si el usuario solo quiere escribir el código.
     handledRef.current = false;
-    setStatus('loading');
+    setStatus('idle');
     setErrorMessage('');
     setManualCode('');
-    setFocusSupported(false);
-    setZoomSupported(false);
-    setZoomValue(1);
-    setZoomMin(1);
-    setZoomMax(1);
-    setFocusMessage('');
-    setIsReadingPhoto(false);
-    setPhotoMessage('');
-
-    const start = async () => {
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error('Este navegador no permite acceder a la cámara. Podés ingresar el código manualmente.');
-        }
-
-        const ZXingBrowser = await loadZXing();
-        if (cancelled || !videoRef.current) return;
-
-        const codeReader = new ZXingBrowser.BrowserMultiFormatReader();
-
-        const constraints: MediaStreamConstraints = {
-          audio: false,
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-          },
-        };
-
-        const controls = await codeReader.decodeFromConstraints(
-          constraints,
-          videoRef.current,
-          (result: any, error: any) => {
-            if (cancelled || handledRef.current) return;
-
-            if (result) {
-              const text = typeof result.getText === 'function' ? result.getText() : result.text;
-              if (text) void emitCode(String(text));
-              return;
-            }
-
-            if (error) {
-              const name = error?.name || error?.constructor?.name || '';
-              if (!['NotFoundException', 'ChecksumException', 'FormatException'].includes(name)) {
-                console.debug('Scanner:', error);
-              }
-            }
-          },
-        );
-
-        if (cancelled) {
-          controls?.stop?.();
-          return;
-        }
-
-        controlsRef.current = controls;
-
-        const stream = videoRef.current?.srcObject as MediaStream | null;
-        const videoTrack = stream?.getVideoTracks?.()[0] || null;
-
-        if (videoTrack) {
-          videoTrackRef.current = videoTrack;
-          await applyCameraEnhancements(videoTrack, true);
-        }
-
-        setStatus('ready');
-      } catch (error: any) {
-        console.error('Error iniciando cámara / lector:', error);
-        setStatus('error');
-
-        if (error?.name === 'NotAllowedError') {
-          setErrorMessage('No se otorgó permiso para usar la cámara. Habilitalo en el navegador o ingresá el código manualmente.');
-        } else if (error?.name === 'NotFoundError') {
-          setErrorMessage('No se encontró una cámara disponible. Podés ingresar el código manualmente.');
-        } else {
-          setErrorMessage(error?.message || 'No se pudo iniciar el escáner. Podés ingresar el código manualmente.');
-        }
-      }
-    };
-
-    void start();
+    setDevices([]);
+    setSelectedDeviceId('');
+    setCameraMessage('');
 
     return () => {
-      cancelled = true;
-      stopScanner();
+      stopCamera();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   if (!open) return null;
 
+  const submitManual = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    const code = manualCode.trim();
+    if (!code) return;
+
+    await emitCode(code);
+  };
+
   return (
-    <div className="fixed inset-0 z-[10000] bg-black/70 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+    <div className="fixed inset-0 z-[10080] bg-white sm:bg-black/60 sm:flex sm:items-center sm:justify-center sm:p-4">
+      <div
+        className="
+          w-full h-[100dvh] bg-white flex flex-col overflow-hidden
+          sm:h-auto sm:max-h-[94dvh] sm:max-w-xl sm:rounded-2xl sm:shadow-2xl
+        "
+      >
+        {/* HEADER SIEMPRE VISIBLE */}
+        <div className="shrink-0 px-4 py-3 border-b border-slate-200 bg-white flex items-start justify-between gap-3">
           <div>
-            <h3 className="font-bold text-slate-800 flex items-center gap-2">
-              <Camera size={20} className="text-indigo-600" />
+            <div className="text-xs uppercase tracking-wide font-bold text-indigo-600">
+              Lector liviano
+            </div>
+            <h3 className="text-lg font-bold text-slate-900 mt-0.5">
               {title}
             </h3>
-            <p className="text-xs text-slate-500 mt-0.5">Para etiquetas pequeñas, usá preferentemente “Tomar foto del QR”. La cámara nativa del celular puede enfocar mucho mejor.</p>
+            <p className="text-xs text-slate-500 mt-1">
+              Ya no se toman fotografías. La cámara se abre solo cuando tocás
+              “Iniciar lector”.
+            </p>
           </div>
-          <button type="button" onClick={onClose} className="p-2 rounded-lg hover:bg-slate-200 text-slate-500">
-            <X size={20} />
+
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 rounded-lg text-slate-500 hover:bg-slate-100"
+          >
+            <X size={22} />
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
-          <div className="rounded-xl border-2 border-emerald-300 bg-emerald-50 p-4">
-            <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
-                <ImagePlus size={20} />
-              </div>
-
-              <div className="flex-1">
-                <div className="font-bold text-emerald-900">
-                  Recomendado: tomar foto del QR
-                </div>
-
-                <p className="text-xs text-emerald-700 mt-1">
-                  Usa la cámara nativa. INVICTOS ahora crea directamente una copia reducida de la foto, sin abrir primero la imagen completa.
-                </p>
-
-                <button
-                  type="button"
-                  onClick={() => photoInputRef.current?.click()}
-                  disabled={isReadingPhoto}
-                  className="mt-3 w-full px-4 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold flex items-center justify-center gap-2 disabled:opacity-50"
-                >
-                  {isReadingPhoto ? (
-                    <Loader2 size={18} className="animate-spin" />
-                  ) : (
-                    <Camera size={18} />
-                  )}
-
-                  {isReadingPhoto ? 'Leyendo foto…' : 'Tomar foto del QR'}
-                </button>
-
-                <input
-                  ref={photoInputRef}
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-
-                    if (file) {
-                      void readQrFromPhoto(file);
-                    }
-                  }}
-                />
-
-                {photoMessage && (
-                  <div
-                    className={`mt-2 text-xs rounded-lg px-3 py-2 ${
-                      photoMessage.startsWith('QR leído:')
-                        ? 'bg-white text-emerald-700 border border-emerald-200'
-                        : 'bg-amber-50 text-amber-800 border border-amber-200'
-                    }`}
-                  >
-                    {photoMessage}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="relative flex items-center gap-3 py-1">
-            <div className="h-px bg-slate-200 flex-1" />
-            <span className="text-[11px] uppercase font-bold tracking-wide text-slate-400">
-              o lector en vivo
-            </span>
-            <div className="h-px bg-slate-200 flex-1" />
-          </div>
-
-          <div
-            className="relative bg-black rounded-xl overflow-hidden aspect-[4/3] flex items-center justify-center"
-            onClick={() => void forceFocus()}
-            title="Tocá la imagen para reenfocar"
-          >
-            <video
-              ref={videoRef}
-              className="w-full h-full object-cover"
-              autoPlay
-              muted
-              playsInline
-            />
-
-            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-              <div className="w-[58%] max-w-[230px] aspect-square border-2 border-white/90 rounded-xl shadow-[0_0_0_9999px_rgba(0,0,0,0.20)] relative">
-                <ScanLine className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 text-white/90" size={34} />
-              </div>
-            </div>
-
-            {status === 'loading' && (
-              <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center text-white gap-3">
-                <Loader2 className="animate-spin" size={30} />
-                <span className="text-sm">Iniciando cámara...</span>
-              </div>
-            )}
-          </div>
-
-          {status === 'ready' && (
-            <div className="space-y-3">
-              <div className="text-center text-sm text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg p-2.5">
-                Cámara lista. Colocá el QR dentro del cuadrado. Si se ve borroso,
-                <strong> alejá un poco el teléfono</strong> y usá el zoom.
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => void forceFocus()}
-                  className="px-4 py-3 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold flex items-center justify-center gap-2"
-                >
-                  <Focus size={18} />
-                  Enfocar
-                </button>
-
-                {zoomSupported ? (
-                  <div className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50">
-                    <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-600 mb-1">
-                      <span className="flex items-center gap-1">
-                        <ZoomIn size={14} />
-                        Zoom
-                      </span>
-                      <span>{zoomValue.toFixed(1)}×</span>
-                    </div>
-
-                    <input
-                      type="range"
-                      min={zoomMin}
-                      max={zoomMax}
-                      step={0.1}
-                      value={zoomValue}
-                      onChange={(e) =>
-                        void changeZoom(Number(e.target.value))
-                      }
-                      className="w-full"
-                    />
-                  </div>
-                ) : (
-                  <div className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-xs text-slate-500 flex items-center justify-center">
-                    Zoom manual no disponible en este navegador.
-                  </div>
-                )}
-              </div>
-
-              {focusMessage && (
-                <div className="text-xs text-center text-slate-500">
-                  {focusMessage}
-                </div>
-              )}
-
-              <div className="text-[11px] text-center text-slate-400">
-                También podés tocar directamente la imagen para intentar reenfocar.
-              </div>
-            </div>
-          )}
-
-          {status === 'error' && errorMessage && (
-            <div className="flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3">
-              <AlertTriangle size={18} className="shrink-0 mt-0.5" />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-
-          <div className="border-t border-slate-200 pt-4">
-            <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 flex items-center gap-1.5 mb-2">
-              <Keyboard size={14} /> Ingreso manual / lector externo
-            </label>
-            <div className="flex gap-2">
-              <input
-                value={manualCode}
-                onChange={(e) => setManualCode(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void emitCode(manualCode);
-                }}
-                autoComplete="off"
-                inputMode="numeric"
-                placeholder="Código corto QR, SKU o código de barras"
-                className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2.5 font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+        {/* CONTENIDO: SCROLL INTERNO */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-4">
+          {status === 'idle' && (
+            <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-5 text-center">
+              <Camera
+                size={34}
+                className="mx-auto text-indigo-600 mb-3"
               />
+
+              <div className="font-bold text-slate-900">
+                Cámara detenida
+              </div>
+
+              <p className="text-sm text-slate-600 mt-2">
+                Esto reduce el consumo de memoria y evita mantener la cámara
+                activa cuando no hace falta.
+              </p>
+
               <button
                 type="button"
-                onClick={() => void emitCode(manualCode)}
-                disabled={!manualCode.trim()}
-                className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={() => void startCamera()}
+                className="mt-4 w-full px-4 py-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center justify-center gap-2"
               >
-                Buscar
+                <Camera size={19} />
+                Iniciar lector QR
               </button>
             </div>
+          )}
+
+          {status === 'loading' && (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-8 flex flex-col items-center justify-center gap-3">
+              <Loader2
+                size={30}
+                className="animate-spin text-indigo-600"
+              />
+              <div className="font-semibold text-slate-700">
+                Iniciando cámara…
+              </div>
+            </div>
+          )}
+
+          {(status === 'ready' || status === 'loading') && (
+            <div className="space-y-3">
+              <div
+                className="relative bg-black rounded-2xl overflow-hidden mx-auto w-full max-w-[420px] aspect-square"
+                onClick={() => void forceFocus()}
+              >
+                <video
+                  ref={videoRef}
+                  className="w-full h-full object-cover"
+                  autoPlay
+                  muted
+                  playsInline
+                />
+
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                  <div className="w-[62%] aspect-square border-2 border-white rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.20)] relative">
+                    <ScanLine
+                      size={36}
+                      className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-white"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {status === 'ready' && (
+                <>
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800 text-center">
+                    Mantené el QR dentro del cuadrado. Si esta lente no enfoca
+                    bien, probá otra cámara en el selector.
+                  </div>
+
+                  {devices.length > 1 && (
+                    <div>
+                      <label className="block text-xs font-bold uppercase tracking-wide text-slate-500 mb-1">
+                        Cámara / lente
+                      </label>
+
+                      <div className="flex gap-2">
+                        <select
+                          value={selectedDeviceId}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setSelectedDeviceId(value);
+                            void startCamera(value);
+                          }}
+                          className="flex-1 min-w-0 border border-slate-300 rounded-xl px-3 py-3 bg-white text-sm"
+                        >
+                          {devices.map((device, index) => (
+                            <option
+                              key={device.deviceId || index}
+                              value={device.deviceId}
+                            >
+                              {device.label || `Cámara ${index + 1}`}
+                            </option>
+                          ))}
+                        </select>
+
+                        <button
+                          type="button"
+                          onClick={() => void refreshDevices()}
+                          className="px-4 rounded-xl border border-slate-300 bg-white text-slate-700"
+                          title="Actualizar cámaras"
+                        >
+                          <RefreshCw size={18} />
+                        </button>
+                      </div>
+
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        En teléfonos con varias cámaras traseras, probá las
+                        distintas opciones hasta encontrar la que enfoque mejor
+                        de cerca.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void forceFocus()}
+                      className="px-4 py-3 rounded-xl border border-indigo-200 bg-indigo-50 text-indigo-700 font-semibold flex items-center justify-center gap-2"
+                    >
+                      <Focus size={18} />
+                      Enfocar
+                    </button>
+
+                    {zoomSupported ? (
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                        <div className="flex items-center justify-between text-xs font-semibold text-slate-600 mb-1">
+                          <span className="flex items-center gap-1">
+                            <ZoomIn size={14} />
+                            Zoom
+                          </span>
+                          <span>{zoomValue.toFixed(1)}×</span>
+                        </div>
+
+                        <input
+                          type="range"
+                          min={zoomMin}
+                          max={zoomMax}
+                          step={0.1}
+                          value={zoomValue}
+                          onChange={(e) =>
+                            void changeZoom(Number(e.target.value))
+                          }
+                          className="w-full"
+                        />
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-xs text-slate-500 text-center">
+                        Zoom no disponible en esta lente.
+                      </div>
+                    )}
+                  </div>
+
+                  {cameraMessage && (
+                    <div className="text-xs text-center text-slate-500">
+                      {cameraMessage}
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      stopCamera();
+                      setStatus('idle');
+                    }}
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 bg-white text-slate-700 font-semibold flex items-center justify-center gap-2"
+                  >
+                    <VideoOff size={18} />
+                    Apagar cámara
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+
+          {status === 'error' && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">
+              <div className="font-bold">No se pudo iniciar la cámara</div>
+              <div className="text-sm mt-1">{errorMessage}</div>
+
+              <button
+                type="button"
+                onClick={() => void startCamera()}
+                className="mt-3 px-4 py-3 rounded-xl bg-red-600 text-white font-semibold"
+              >
+                Reintentar
+              </button>
+            </div>
+          )}
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+            <strong>Importante:</strong> eliminé por completo “Tomar foto del
+            QR”. En este teléfono esa operación estaba provocando el error de
+            memoria y el cierre de la página.
           </div>
+        </div>
+
+        {/* FOOTER SIEMPRE VISIBLE EN CELULAR */}
+        <div
+          className="shrink-0 border-t border-slate-200 bg-white p-3"
+          style={{
+            paddingBottom:
+              'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
+          <form
+            onSubmit={(e) => void submitManual(e)}
+            className="flex gap-2"
+          >
+            <div className="relative flex-1 min-w-0">
+              <Keyboard
+                size={17}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+
+              <input
+                type="text"
+                inputMode="numeric"
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value)}
+                placeholder="Código corto, ej. 1007"
+                className="w-full border border-slate-300 rounded-xl pl-10 pr-3 py-3 text-base"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={!manualCode.trim()}
+              className="px-4 py-3 rounded-xl bg-slate-900 text-white font-bold disabled:opacity-40"
+            >
+              Buscar
+            </button>
+          </form>
         </div>
       </div>
     </div>
