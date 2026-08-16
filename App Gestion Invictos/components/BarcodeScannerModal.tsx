@@ -156,6 +156,8 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     setPhotoMessage('');
     setIsReadingPhoto(true);
 
+    let bitmap: ImageBitmap | null = null;
+
     try {
       await loadJsQr();
 
@@ -163,98 +165,245 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         throw new Error('No se pudo inicializar el lector QR.');
       }
 
-      const objectUrl = URL.createObjectURL(file);
+      /*
+       * IMPORTANTE PARA CELULARES:
+       * No cargamos primero la foto completa en <img>, porque una foto de
+       * 12/50 MP puede ocupar decenas o cientos de MB una vez descomprimida.
+       *
+       * createImageBitmap permite pedir al navegador una versión reducida
+       * desde el comienzo. Para un QR pequeño no necesitamos más de ~1200 px.
+       */
+      const targetMaxSide = 1200;
 
-      try {
-        const image = new Image();
+      if (typeof createImageBitmap === 'function') {
+        // Primero obtenemos dimensiones sin mantener múltiples copias grandes.
+        const originalBitmap = await createImageBitmap(file);
 
-        await new Promise<void>((resolve, reject) => {
-          image.onload = () => resolve();
-          image.onerror = () =>
-            reject(new Error('No se pudo abrir la foto tomada.'));
-          image.src = objectUrl;
-        });
+        const originalWidth = originalBitmap.width;
+        const originalHeight = originalBitmap.height;
 
-        /*
-         * Trabajamos a buena resolución pero limitamos imágenes gigantes
-         * para no bloquear celulares con fotos de 12/50 MP.
-         */
-        const maxSide = 2200;
         const scale = Math.min(
           1,
-          maxSide / Math.max(image.naturalWidth, image.naturalHeight),
+          targetMaxSide / Math.max(originalWidth, originalHeight),
         );
 
-        const width = Math.max(1, Math.round(image.naturalWidth * scale));
-        const height = Math.max(1, Math.round(image.naturalHeight * scale));
+        const targetWidth = Math.max(
+          1,
+          Math.round(originalWidth * scale),
+        );
+        const targetHeight = Math.max(
+          1,
+          Math.round(originalHeight * scale),
+        );
 
-        const canvas = document.createElement('canvas');
+        if (scale < 1) {
+          originalBitmap.close();
+
+          bitmap = await createImageBitmap(file, {
+            resizeWidth: targetWidth,
+            resizeHeight: targetHeight,
+            resizeQuality: 'medium',
+          });
+        } else {
+          bitmap = originalBitmap;
+        }
+      } else {
+        /*
+         * Fallback para navegadores viejos.
+         * Limitamos igualmente el canvas final a 1200 px.
+         */
+        const objectUrl = URL.createObjectURL(file);
+
+        try {
+          const image = new Image();
+
+          await new Promise<void>((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = () =>
+              reject(new Error('No se pudo abrir la foto tomada.'));
+            image.src = objectUrl;
+          });
+
+          const scale = Math.min(
+            1,
+            targetMaxSide /
+              Math.max(image.naturalWidth, image.naturalHeight),
+          );
+
+          const targetWidth = Math.max(
+            1,
+            Math.round(image.naturalWidth * scale),
+          );
+          const targetHeight = Math.max(
+            1,
+            Math.round(image.naturalHeight * scale),
+          );
+
+          const temporaryCanvas = document.createElement('canvas');
+          temporaryCanvas.width = targetWidth;
+          temporaryCanvas.height = targetHeight;
+
+          const temporaryContext = temporaryCanvas.getContext('2d');
+
+          if (!temporaryContext) {
+            throw new Error('No se pudo reducir la fotografía.');
+          }
+
+          temporaryContext.drawImage(
+            image,
+            0,
+            0,
+            targetWidth,
+            targetHeight,
+          );
+
+          bitmap = await createImageBitmap(temporaryCanvas);
+
+          temporaryCanvas.width = 1;
+          temporaryCanvas.height = 1;
+        } finally {
+          URL.revokeObjectURL(objectUrl);
+        }
+      }
+
+      if (!bitmap) {
+        throw new Error('No se pudo preparar la fotografía.');
+      }
+
+      const width = bitmap.width;
+      const height = bitmap.height;
+
+      /*
+       * Primera lectura: recorte central cuadrado.
+       * Es la opción que menos memoria usa y coincide con la forma en que
+       * se le pide al usuario encuadrar el QR.
+       */
+      const cropSize = Math.max(
+        1,
+        Math.round(Math.min(width, height) * 0.82),
+      );
+      const cropX = Math.max(0, Math.round((width - cropSize) / 2));
+      const cropY = Math.max(0, Math.round((height - cropSize) / 2));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = cropSize;
+      canvas.height = cropSize;
+
+      const ctx = canvas.getContext('2d', {
+        willReadFrequently: true,
+      });
+
+      if (!ctx) {
+        throw new Error('No se pudo analizar la fotografía.');
+      }
+
+      ctx.drawImage(
+        bitmap,
+        cropX,
+        cropY,
+        cropSize,
+        cropSize,
+        0,
+        0,
+        cropSize,
+        cropSize,
+      );
+
+      let imageData = ctx.getImageData(
+        0,
+        0,
+        cropSize,
+        cropSize,
+      );
+
+      let result = window.jsQR(
+        imageData.data,
+        cropSize,
+        cropSize,
+        { inversionAttempts: 'dontInvert' },
+      );
+
+      /*
+       * Segundo intento: misma imagen con inversión permitida.
+       * Reutilizamos exactamente el mismo buffer para no duplicar memoria.
+       */
+      if (!result) {
+        result = window.jsQR(
+          imageData.data,
+          cropSize,
+          cropSize,
+          { inversionAttempts: 'attemptBoth' },
+        );
+      }
+
+      // Liberamos referencia grande antes de continuar.
+      imageData = null as any;
+
+      /*
+       * Si no apareció en el centro, probamos una versión completa,
+       * pero todavía limitada a 1200 px.
+       */
+      if (!result) {
         canvas.width = width;
         canvas.height = height;
 
-        const ctx = canvas.getContext('2d', {
-          willReadFrequently: true,
-        });
+        ctx.drawImage(bitmap, 0, 0, width, height);
 
-        if (!ctx) {
-          throw new Error('No se pudo analizar la fotografía.');
-        }
+        let fullData = ctx.getImageData(0, 0, width, height);
 
-        ctx.drawImage(image, 0, 0, width, height);
-
-        const imageData = ctx.getImageData(0, 0, width, height);
-
-        let result = window.jsQR(
-          imageData.data,
+        result = window.jsQR(
+          fullData.data,
           width,
           height,
           { inversionAttempts: 'attemptBoth' },
         );
 
-        /*
-         * Si no aparece en la imagen completa, probamos también un recorte
-         * central ampliado. Es útil cuando el QR ocupa una parte chica de la foto.
-         */
-        if (!result) {
-          const cropSize = Math.round(Math.min(width, height) * 0.72);
-          const cropX = Math.max(0, Math.round((width - cropSize) / 2));
-          const cropY = Math.max(0, Math.round((height - cropSize) / 2));
-
-          const cropData = ctx.getImageData(
-            cropX,
-            cropY,
-            cropSize,
-            cropSize,
-          );
-
-          result = window.jsQR(
-            cropData.data,
-            cropSize,
-            cropSize,
-            { inversionAttempts: 'attemptBoth' },
-          );
-        }
-
-        const detected = (result?.data || '').trim();
-
-        if (!detected) {
-          setPhotoMessage(
-            'No pude detectar el QR en la foto. Acercate hasta que el QR se vea nítido, tocá sobre él para enfocar y sacá otra foto.',
-          );
-          return;
-        }
-
-        setPhotoMessage(`QR leído: ${detected}`);
-        await emitCode(detected);
-      } finally {
-        URL.revokeObjectURL(objectUrl);
+        fullData = null as any;
       }
+
+      // Liberamos memoria inmediatamente.
+      bitmap.close();
+      bitmap = null;
+
+      canvas.width = 1;
+      canvas.height = 1;
+
+      const detected = (result?.data || '').trim();
+
+      if (!detected) {
+        setPhotoMessage(
+          'No pude detectar el QR. Sacá la foto con el QR centrado, nítido y ocupando una parte importante de la imagen.',
+        );
+        return;
+      }
+
+      setPhotoMessage(`QR leído: ${detected}`);
+      await emitCode(detected);
     } catch (error: any) {
       console.error('Error leyendo QR desde foto:', error);
-      setPhotoMessage(
-        error?.message || 'No se pudo leer el QR de la fotografía.',
-      );
+
+      const message = String(error?.message || '');
+
+      if (
+        /memory|memoria|allocation|out of/i.test(message)
+      ) {
+        setPhotoMessage(
+          'El teléfono no pudo procesar la foto por falta de memoria. Cerrá otras aplicaciones y volvé a intentar. INVICTOS ahora usa una versión reducida de la imagen.',
+        );
+      } else {
+        setPhotoMessage(
+          message || 'No se pudo leer el QR de la fotografía.',
+        );
+      }
     } finally {
+      if (bitmap) {
+        try {
+          bitmap.close();
+        } catch {
+          // sin acción
+        }
+      }
+
       setIsReadingPhoto(false);
 
       if (photoInputRef.current) {
@@ -262,6 +411,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       }
     }
   };
+
 
   const applyCameraEnhancements = async (
     track: MediaStreamTrack,
@@ -556,7 +706,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 </div>
 
                 <p className="text-xs text-emerald-700 mt-1">
-                  Usa la cámara nativa del teléfono, que enfoca mucho mejor que la cámara dentro del navegador.
+                  Usa la cámara nativa del teléfono. INVICTOS reduce la foto antes de analizarla para evitar problemas de memoria.
                 </p>
 
                 <button
