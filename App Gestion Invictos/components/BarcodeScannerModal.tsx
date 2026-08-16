@@ -18,6 +18,47 @@ interface BarcodeScannerModalProps {
   onDetected: (code: string) => void | Promise<void>;
 }
 
+const CAMERA_PREFERENCE_KEY = 'invictos_preferred_qr_camera_v1';
+
+interface CameraPreference {
+  deviceId: string;
+  label?: string;
+}
+
+const readCameraPreference = (): CameraPreference | null => {
+  try {
+    const raw = window.localStorage.getItem(CAMERA_PREFERENCE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as CameraPreference;
+
+    if (!parsed?.deviceId) return null;
+
+    return {
+      deviceId: String(parsed.deviceId),
+      label: parsed.label ? String(parsed.label) : undefined,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const saveCameraPreference = (device: MediaDeviceInfo | null) => {
+  try {
+    if (!device?.deviceId) return;
+
+    window.localStorage.setItem(
+      CAMERA_PREFERENCE_KEY,
+      JSON.stringify({
+        deviceId: device.deviceId,
+        label: device.label || '',
+      } satisfies CameraPreference),
+    );
+  } catch {
+    // Si localStorage está bloqueado, simplemente no recordamos la lente.
+  }
+};
+
 declare global {
   interface Window {
     BarcodeDetector?: new (options?: {
@@ -167,18 +208,49 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     }
   };
 
-  const refreshDevices = async () => {
+  const refreshDevices = async (): Promise<MediaDeviceInfo[]> => {
     try {
       const all = await navigator.mediaDevices.enumerateDevices();
       const cameras = all.filter((device) => device.kind === 'videoinput');
 
       setDevices(cameras);
 
-      if (!selectedDeviceId && cameras.length === 1) {
+      const preferred = readCameraPreference();
+
+      if (preferred) {
+        const exact = cameras.find(
+          (camera) => camera.deviceId === preferred.deviceId,
+        );
+
+        const byLabel =
+          !exact && preferred.label
+            ? cameras.find(
+                (camera) =>
+                  camera.label &&
+                  camera.label.toLowerCase() ===
+                    preferred.label!.toLowerCase(),
+              )
+            : null;
+
+        const matched = exact || byLabel;
+
+        if (matched) {
+          setSelectedDeviceId(matched.deviceId);
+
+          // Si Android cambió el deviceId pero mantuvo el nombre,
+          // actualizamos la preferencia.
+          if (matched.deviceId !== preferred.deviceId) {
+            saveCameraPreference(matched);
+          }
+        }
+      } else if (!selectedDeviceId && cameras.length === 1) {
         setSelectedDeviceId(cameras[0].deviceId);
       }
+
+      return cameras;
     } catch (error) {
       console.debug('No se pudieron enumerar cámaras:', error);
+      return [];
     }
   };
 
@@ -433,7 +505,10 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     );
   };
 
-  const startCamera = async (deviceId?: string) => {
+  const startCamera = async (
+    requestedDeviceId?: string,
+    allowRememberedCamera = true,
+  ) => {
     stopCamera();
     handledRef.current = false;
 
@@ -444,6 +519,47 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     try {
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('Este navegador no permite usar la cámara.');
+      }
+
+      let deviceId = requestedDeviceId || '';
+
+      /*
+       * Si el usuario no eligió una cámara en esta apertura,
+       * intentamos recuperar la lente que funcionó anteriormente.
+       */
+      if (!deviceId && allowRememberedCamera) {
+        const preferred = readCameraPreference();
+
+        if (preferred) {
+          const available = await refreshDevices();
+
+          const exact = available.find(
+            (camera) => camera.deviceId === preferred.deviceId,
+          );
+
+          const byLabel =
+            !exact && preferred.label
+              ? available.find(
+                  (camera) =>
+                    camera.label &&
+                    camera.label.toLowerCase() ===
+                      preferred.label!.toLowerCase(),
+                )
+              : null;
+
+          const matched = exact || byLabel;
+
+          if (matched) {
+            deviceId = matched.deviceId;
+            setSelectedDeviceId(matched.deviceId);
+          } else {
+            /*
+             * enumerateDevices puede ocultar etiquetas/IDs antes de abrir
+             * la cámara. En ese caso probamos primero el deviceId guardado.
+             */
+            deviceId = preferred.deviceId;
+          }
+        }
       }
 
       const videoConstraints: MediaTrackConstraints = deviceId
@@ -458,10 +574,39 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
             height: { ideal: 540, max: 720 },
           };
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: videoConstraints,
-      });
+      let stream: MediaStream;
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: videoConstraints,
+        });
+      } catch (firstError) {
+        /*
+         * Si la cámara recordada dejó de existir (por permisos, actualización
+         * de Android, cambio de navegador, etc.), no hacemos fallar el lector.
+         * Volvemos automáticamente a una cámara trasera normal.
+         */
+        if (deviceId) {
+          console.debug(
+            'La cámara preferida no está disponible; usando cámara trasera por defecto.',
+            firstError,
+          );
+
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+              facingMode: { ideal: 'environment' },
+              width: { ideal: 960, max: 1280 },
+              height: { ideal: 540, max: 720 },
+            },
+          });
+
+          deviceId = '';
+        } else {
+          throw firstError;
+        }
+      }
 
       streamRef.current = stream;
 
@@ -482,15 +627,46 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         await configureTrack(track);
 
         const settings = track.getSettings?.();
+
         if (settings?.deviceId) {
           setSelectedDeviceId(settings.deviceId);
         }
       }
 
-      await refreshDevices();
+      const available = await refreshDevices();
+
+      /*
+       * Si abrimos una lente recordada correctamente, mostramos una indicación.
+       * No guardamos automáticamente una cámara nueva: solo se guarda cuando
+       * el usuario la elige manualmente en el selector.
+       */
+      const currentId =
+        track?.getSettings?.().deviceId || selectedDeviceId || deviceId;
+
+      const currentDevice = available.find(
+        (camera) => camera.deviceId === currentId,
+      );
+
       buildDetector();
 
       setStatus('ready');
+
+      const preferred = readCameraPreference();
+
+      if (
+        currentDevice &&
+        preferred &&
+        (preferred.deviceId === currentDevice.deviceId ||
+          (preferred.label &&
+            currentDevice.label &&
+            preferred.label.toLowerCase() ===
+              currentDevice.label.toLowerCase()))
+      ) {
+        setCameraMessage(
+          `Cámara recordada: ${currentDevice.label || 'lente preferida'}.`,
+        );
+      }
+
       scheduleScan();
     } catch (error: any) {
       console.error('Error abriendo cámara:', error);
@@ -590,8 +766,8 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
               </div>
 
               <p className="text-sm text-slate-600 mt-2">
-                Esto reduce el consumo de memoria y evita mantener la cámara
-                activa cuando no hace falta.
+                Esto reduce el consumo de memoria. Si ya elegiste una lente que
+                funciona bien, INVICTOS intentará usarla nuevamente.
               </p>
 
               <button
@@ -659,8 +835,14 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                           value={selectedDeviceId}
                           onChange={(e) => {
                             const value = e.target.value;
+                            const selected = devices.find(
+                              (device) => device.deviceId === value,
+                            ) || null;
+
                             setSelectedDeviceId(value);
-                            void startCamera(value);
+                            saveCameraPreference(selected);
+
+                            void startCamera(value, false);
                           }}
                           className="flex-1 min-w-0 border border-slate-300 rounded-xl px-3 py-3 bg-white text-sm"
                         >
@@ -685,9 +867,8 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                       </div>
 
                       <p className="text-[11px] text-slate-400 mt-1">
-                        En teléfonos con varias cámaras traseras, probá las
-                        distintas opciones hasta encontrar la que enfoque mejor
-                        de cerca.
+                        La lente que elijas queda recordada en este celular.
+                        La próxima vez INVICTOS intentará abrirla directamente.
                       </p>
                     </div>
                   )}
