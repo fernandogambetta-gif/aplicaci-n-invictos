@@ -150,6 +150,88 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
     });
   };
 
+  const readImageDimensions = async (
+    file: File,
+  ): Promise<{ width: number; height: number } | null> => {
+    /*
+     * Leemos solo los primeros 256 KB del archivo.
+     * Esto permite conocer las dimensiones de JPEG/PNG sin decodificar
+     * una foto de 12/50 MP completa en memoria.
+     */
+    const header = await file.slice(0, 256 * 1024).arrayBuffer();
+    const view = new DataView(header);
+
+    // PNG
+    if (
+      header.byteLength >= 24 &&
+      view.getUint32(0, false) === 0x89504e47 &&
+      view.getUint32(4, false) === 0x0d0a1a0a
+    ) {
+      return {
+        width: view.getUint32(16, false),
+        height: view.getUint32(20, false),
+      };
+    }
+
+    // JPEG
+    if (
+      header.byteLength >= 4 &&
+      view.getUint16(0, false) === 0xffd8
+    ) {
+      let offset = 2;
+
+      while (offset + 9 < header.byteLength) {
+        if (view.getUint8(offset) !== 0xff) {
+          offset += 1;
+          continue;
+        }
+
+        const marker = view.getUint8(offset + 1);
+        offset += 2;
+
+        // Marcadores sin longitud
+        if (
+          marker === 0xd8 ||
+          marker === 0xd9 ||
+          (marker >= 0xd0 && marker <= 0xd7)
+        ) {
+          continue;
+        }
+
+        if (offset + 2 > header.byteLength) break;
+
+        const length = view.getUint16(offset, false);
+
+        const isSof =
+          marker === 0xc0 ||
+          marker === 0xc1 ||
+          marker === 0xc2 ||
+          marker === 0xc3 ||
+          marker === 0xc5 ||
+          marker === 0xc6 ||
+          marker === 0xc7 ||
+          marker === 0xc9 ||
+          marker === 0xca ||
+          marker === 0xcb ||
+          marker === 0xcd ||
+          marker === 0xce ||
+          marker === 0xcf;
+
+        if (isSof && offset + 7 < header.byteLength) {
+          return {
+            height: view.getUint16(offset + 3, false),
+            width: view.getUint16(offset + 5, false),
+          };
+        }
+
+        if (length < 2) break;
+        offset += length;
+      }
+    }
+
+    return null;
+  };
+
   const readQrFromPhoto = async (file: File) => {
     if (!file) return;
 
@@ -166,124 +248,72 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       }
 
       /*
-       * IMPORTANTE PARA CELULARES:
-       * No cargamos primero la foto completa en <img>, porque una foto de
-       * 12/50 MP puede ocupar decenas o cientos de MB una vez descomprimida.
-       *
-       * createImageBitmap permite pedir al navegador una versión reducida
-       * desde el comienzo. Para un QR pequeño no necesitamos más de ~1200 px.
+       * IMPORTANTE:
+       * No abrimos una copia completa de la fotografía.
+       * Primero averiguamos dimensiones leyendo unos pocos KB y luego
+       * pedimos createImageBitmap directamente a tamaño reducido.
        */
-      const targetMaxSide = 1200;
-
-      if (typeof createImageBitmap === 'function') {
-        // Primero obtenemos dimensiones sin mantener múltiples copias grandes.
-        const originalBitmap = await createImageBitmap(file);
-
-        const originalWidth = originalBitmap.width;
-        const originalHeight = originalBitmap.height;
-
-        const scale = Math.min(
-          1,
-          targetMaxSide / Math.max(originalWidth, originalHeight),
+      if (typeof createImageBitmap !== 'function') {
+        throw new Error(
+          'Este navegador no permite procesar la foto de forma segura. Usá el lector en vivo o escribí el código corto.',
         );
-
-        const targetWidth = Math.max(
-          1,
-          Math.round(originalWidth * scale),
-        );
-        const targetHeight = Math.max(
-          1,
-          Math.round(originalHeight * scale),
-        );
-
-        if (scale < 1) {
-          originalBitmap.close();
-
-          bitmap = await createImageBitmap(file, {
-            resizeWidth: targetWidth,
-            resizeHeight: targetHeight,
-            resizeQuality: 'medium',
-          });
-        } else {
-          bitmap = originalBitmap;
-        }
-      } else {
-        /*
-         * Fallback para navegadores viejos.
-         * Limitamos igualmente el canvas final a 1200 px.
-         */
-        const objectUrl = URL.createObjectURL(file);
-
-        try {
-          const image = new Image();
-
-          await new Promise<void>((resolve, reject) => {
-            image.onload = () => resolve();
-            image.onerror = () =>
-              reject(new Error('No se pudo abrir la foto tomada.'));
-            image.src = objectUrl;
-          });
-
-          const scale = Math.min(
-            1,
-            targetMaxSide /
-              Math.max(image.naturalWidth, image.naturalHeight),
-          );
-
-          const targetWidth = Math.max(
-            1,
-            Math.round(image.naturalWidth * scale),
-          );
-          const targetHeight = Math.max(
-            1,
-            Math.round(image.naturalHeight * scale),
-          );
-
-          const temporaryCanvas = document.createElement('canvas');
-          temporaryCanvas.width = targetWidth;
-          temporaryCanvas.height = targetHeight;
-
-          const temporaryContext = temporaryCanvas.getContext('2d');
-
-          if (!temporaryContext) {
-            throw new Error('No se pudo reducir la fotografía.');
-          }
-
-          temporaryContext.drawImage(
-            image,
-            0,
-            0,
-            targetWidth,
-            targetHeight,
-          );
-
-          bitmap = await createImageBitmap(temporaryCanvas);
-
-          temporaryCanvas.width = 1;
-          temporaryCanvas.height = 1;
-        } finally {
-          URL.revokeObjectURL(objectUrl);
-        }
       }
 
-      if (!bitmap) {
-        throw new Error('No se pudo preparar la fotografía.');
-      }
+      const dimensions = await readImageDimensions(file);
+
+      // Si no pudimos conocerlas, usamos un tamaño cuadrado pequeño.
+      const originalWidth = Math.max(1, dimensions?.width || 1200);
+      const originalHeight = Math.max(1, dimensions?.height || 1200);
+
+      // 900 px de lado máximo: suficiente para QR y muy liviano en memoria.
+      const targetMaxSide = 900;
+      const scale = Math.min(
+        1,
+        targetMaxSide / Math.max(originalWidth, originalHeight),
+      );
+
+      const targetWidth = Math.max(
+        1,
+        Math.round(originalWidth * scale),
+      );
+      const targetHeight = Math.max(
+        1,
+        Math.round(originalHeight * scale),
+      );
+
+      /*
+       * Esta es la diferencia fundamental:
+       * el navegador recibe YA las dimensiones reducidas que debe producir.
+       * No creamos antes un ImageBitmap de resolución completa.
+       */
+      bitmap = await createImageBitmap(file, {
+        imageOrientation: 'from-image',
+        resizeWidth: targetWidth,
+        resizeHeight: targetHeight,
+        resizeQuality: 'medium',
+      });
 
       const width = bitmap.width;
       const height = bitmap.height;
 
       /*
-       * Primera lectura: recorte central cuadrado.
-       * Es la opción que menos memoria usa y coincide con la forma en que
-       * se le pide al usuario encuadrar el QR.
+       * Primero analizamos el centro, donde se supone que el usuario
+       * encuadra el QR. Esto reduce todavía más la memoria necesaria.
        */
       const cropSize = Math.max(
         1,
-        Math.round(Math.min(width, height) * 0.82),
+        Math.round(Math.min(width, height) * 0.84),
       );
-      const cropX = Math.max(0, Math.round((width - cropSize) / 2));
-      const cropY = Math.max(0, Math.round((height - cropSize) / 2));
+
+      const cropX = Math.max(
+        0,
+        Math.round((width - cropSize) / 2),
+      );
+
+      const cropY = Math.max(
+        0,
+        Math.round((height - cropSize) / 2),
+      );
 
       const canvas = document.createElement('canvas');
       canvas.width = cropSize;
@@ -309,7 +339,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         cropSize,
       );
 
-      let imageData = ctx.getImageData(
+      let centerData = ctx.getImageData(
         0,
         0,
         cropSize,
@@ -317,31 +347,21 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
       );
 
       let result = window.jsQR(
-        imageData.data,
+        centerData.data,
         cropSize,
         cropSize,
-        { inversionAttempts: 'dontInvert' },
+        {
+          // Primero el intento menos costoso.
+          inversionAttempts: 'dontInvert',
+        },
       );
 
-      /*
-       * Segundo intento: misma imagen con inversión permitida.
-       * Reutilizamos exactamente el mismo buffer para no duplicar memoria.
-       */
-      if (!result) {
-        result = window.jsQR(
-          imageData.data,
-          cropSize,
-          cropSize,
-          { inversionAttempts: 'attemptBoth' },
-        );
-      }
-
-      // Liberamos referencia grande antes de continuar.
-      imageData = null as any;
+      centerData = null as any;
 
       /*
-       * Si no apareció en el centro, probamos una versión completa,
-       * pero todavía limitada a 1200 px.
+       * Segundo intento:
+       * solo si no apareció en el centro, analizamos la imagen reducida
+       * completa. Nunca la fotografía original.
        */
       if (!result) {
         canvas.width = width;
@@ -349,19 +369,26 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
         ctx.drawImage(bitmap, 0, 0, width, height);
 
-        let fullData = ctx.getImageData(0, 0, width, height);
+        let fullData = ctx.getImageData(
+          0,
+          0,
+          width,
+          height,
+        );
 
         result = window.jsQR(
           fullData.data,
           width,
           height,
-          { inversionAttempts: 'attemptBoth' },
+          {
+            inversionAttempts: 'attemptBoth',
+          },
         );
 
         fullData = null as any;
       }
 
-      // Liberamos memoria inmediatamente.
+      // Liberación inmediata.
       bitmap.close();
       bitmap = null;
 
@@ -372,7 +399,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
 
       if (!detected) {
         setPhotoMessage(
-          'No pude detectar el QR. Sacá la foto con el QR centrado, nítido y ocupando una parte importante de la imagen.',
+          'No pude detectar el QR. Sacá la foto con el QR centrado, nítido y ocupando una parte importante de la pantalla.',
         );
         return;
       }
@@ -388,7 +415,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         /memory|memoria|allocation|out of/i.test(message)
       ) {
         setPhotoMessage(
-          'El teléfono no pudo procesar la foto por falta de memoria. Cerrá otras aplicaciones y volvé a intentar. INVICTOS ahora usa una versión reducida de la imagen.',
+          'El teléfono rechazó el procesamiento por memoria. No volveré a intentar con la foto completa. Usá el lector en vivo o escribí el código corto.',
         );
       } else {
         setPhotoMessage(
@@ -400,7 +427,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
         try {
           bitmap.close();
         } catch {
-          // sin acción
+          // Sin acción.
         }
       }
 
@@ -706,7 +733,7 @@ const BarcodeScannerModal: React.FC<BarcodeScannerModalProps> = ({
                 </div>
 
                 <p className="text-xs text-emerald-700 mt-1">
-                  Usa la cámara nativa del teléfono. INVICTOS reduce la foto antes de analizarla para evitar problemas de memoria.
+                  Usa la cámara nativa. INVICTOS ahora crea directamente una copia reducida de la foto, sin abrir primero la imagen completa.
                 </p>
 
                 <button
