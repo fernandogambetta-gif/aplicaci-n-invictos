@@ -13,11 +13,54 @@ import { StorageService } from './services/storageService';
 import { Product, Sale, User } from './types';
 import { Menu, Loader2, Database, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
+const SESSION_STORAGE_KEY = 'invictos_authenticated_session_v1';
+const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
+
+interface StoredSession {
+  userId: string;
+  expiresAt: number;
+  currentView?: string;
+}
+
+const readStoredSession = (): StoredSession | null => {
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as StoredSession;
+
+    if (
+      !parsed?.userId ||
+      !Number.isFinite(Number(parsed.expiresAt)) ||
+      Number(parsed.expiresAt) <= Date.now()
+    ) {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+      return null;
+    }
+
+    return {
+      userId: String(parsed.userId),
+      expiresAt: Number(parsed.expiresAt),
+      currentView: parsed.currentView || 'dashboard',
+    };
+  } catch {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    return null;
+  }
+};
+
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [currentView, setCurrentView] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+
+  // La sesión se persiste para sobrevivir recargas del navegador
+  // (por ejemplo, cuando Android abre la cámara nativa y luego restaura la pestaña).
+  const [isRestoringSession, setIsRestoringSession] = useState(true);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null);
+  const [sessionRestoreError, setSessionRestoreError] = useState('');
+  const [sessionRestoreNonce, setSessionRestoreNonce] = useState(0);
 
   // App State
   const [products, setProducts] = useState<Product[]>([]);
@@ -58,6 +101,104 @@ const App: React.FC = () => {
     // En Vercel (prod) lo verás 1 vez.
   }, [missing.join('|')]);
 
+  // Restaurar una sesión válida al cargar la aplicación.
+  // Se reintenta varias veces porque, después de que Android mata una pestaña
+  // por memoria, Firestore puede tardar unos instantes en quedar operativo.
+  useEffect(() => {
+    let cancelled = false;
+
+    const wait = (ms: number) =>
+      new Promise((resolve) => window.setTimeout(resolve, ms));
+
+    const restoreSession = async () => {
+      const stored = readStoredSession();
+
+      setSessionRestoreError('');
+
+      if (!stored) {
+        if (!cancelled) setIsRestoringSession(false);
+        return;
+      }
+
+      if (!cancelled) setIsRestoringSession(true);
+
+      const delays = [0, 400, 1000, 2000];
+
+      for (let attempt = 0; attempt < delays.length; attempt += 1) {
+        if (cancelled) return;
+
+        if (delays[attempt] > 0) {
+          await wait(delays[attempt]);
+        }
+
+        try {
+          const users = await StorageService.getUsers();
+
+          /*
+           * Una lista vacía inmediatamente después de una reconstrucción de
+           * Chrome puede ser transitoria. No eliminamos la sesión por eso.
+           */
+          if (users.length === 0) {
+            throw new Error('Lista de usuarios temporalmente vacía.');
+          }
+
+          const freshUser =
+            users.find((user) => user.id === stored.userId) || null;
+
+          if (!freshUser) {
+            // Firestore respondió correctamente y el usuario realmente ya no existe.
+            window.localStorage.removeItem(SESSION_STORAGE_KEY);
+
+            if (!cancelled) {
+              setCurrentUser(null);
+              setSessionExpiresAt(null);
+              setIsRestoringSession(false);
+            }
+            return;
+          }
+
+          if (!cancelled) {
+            setCurrentUser(freshUser);
+            setCurrentView(stored.currentView || 'dashboard');
+            setSessionExpiresAt(stored.expiresAt);
+            setSessionRestoreError('');
+            setIsRestoringSession(false);
+
+            if (freshUser.mustChangePin) {
+              setIsProfileOpen(true);
+            }
+          }
+
+          return;
+        } catch (error) {
+          console.error(
+            `❌ Intento ${attempt + 1} de restaurar sesión`,
+            error,
+          );
+        }
+      }
+
+      /*
+       * Muy importante:
+       * NO borramos la sesión ni mandamos directamente al login.
+       * El usuario puede reintentar cuando Firestore se recupere.
+       */
+      if (!cancelled) {
+        setIsRestoringSession(false);
+        setSessionRestoreError(
+          'INVICTOS no pudo recuperar tu sesión todavía. Tu sesión sigue guardada.',
+        );
+      }
+    };
+
+    void restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionRestoreNonce]);
+
+
   const refreshData = useCallback(async () => {
     setIsLoading(true);
 
@@ -84,7 +225,19 @@ const App: React.FC = () => {
   }, [currentUser, isConfigured, refreshData]);
 
   const handleLogin = (user: User) => {
+    const expiresAt = Date.now() + SESSION_DURATION_MS;
+
     setCurrentUser(user);
+    setSessionExpiresAt(expiresAt);
+
+    window.localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        userId: user.id,
+        expiresAt,
+        currentView: 'dashboard',
+      } satisfies StoredSession),
+    );
 
     // Si el administrador blanqueó su PIN, obligamos al usuario
     // a cambiar la clave temporal antes de seguir usando INVICTOS.
@@ -96,11 +249,46 @@ const App: React.FC = () => {
   };
 
   const handleLogout = () => {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    setSessionExpiresAt(null);
     setCurrentUser(null);
     setCurrentView('dashboard');
     setProducts([]);
     setSales([]);
   };
+
+  // Mantener la vista actual dentro de la sesión.
+  // Si Android recarga la pestaña después de usar la cámara, vuelve a la misma sección.
+  useEffect(() => {
+    if (!currentUser || !sessionExpiresAt) return;
+
+    window.localStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        userId: currentUser.id,
+        expiresAt: sessionExpiresAt,
+        currentView,
+      } satisfies StoredSession),
+    );
+  }, [currentUser?.id, currentView, sessionExpiresAt]);
+
+  // Cierre automático al cumplirse las 8 horas.
+  useEffect(() => {
+    if (!currentUser || !sessionExpiresAt) return;
+
+    const remaining = sessionExpiresAt - Date.now();
+
+    if (remaining <= 0) {
+      handleLogout();
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      handleLogout();
+    }, remaining);
+
+    return () => window.clearTimeout(timer);
+  }, [currentUser?.id, sessionExpiresAt]);
 
   const handleUpdateUser = async (updatedUser: User) => {
     await StorageService.updateUser(updatedUser);
@@ -161,6 +349,67 @@ const App: React.FC = () => {
             <br />
             Luego en Vercel: Project → Settings → Environment Variables → redeploy.
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  // --- RESTAURANDO SESIÓN ---
+  if (isRestoringSession) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-2xl px-8 py-7 flex flex-col items-center gap-3">
+          <Loader2 className="animate-spin text-indigo-600" size={34} />
+          <div className="font-bold text-slate-800">Restaurando sesión...</div>
+          <div className="text-xs text-slate-500 text-center">
+            Recuperando tu usuario de INVICTOS. Puede demorar unos segundos
+            después de que Android haya cerrado la página.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Si había una sesión válida pero Firestore no respondió, no expulsamos al usuario.
+  if (!currentUser && sessionRestoreError && readStoredSession()) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="max-w-sm w-full bg-white rounded-2xl shadow-2xl p-7 text-center">
+          <AlertTriangle
+            size={38}
+            className="mx-auto text-amber-500 mb-3"
+          />
+
+          <h2 className="text-xl font-bold text-slate-800">
+            No se pudo restaurar la sesión
+          </h2>
+
+          <p className="text-sm text-slate-500 mt-2">
+            {sessionRestoreError}
+          </p>
+
+          <button
+            type="button"
+            onClick={() => {
+              setIsRestoringSession(true);
+              setSessionRestoreNonce((value) => value + 1);
+            }}
+            className="w-full mt-5 py-3 rounded-xl bg-indigo-600 text-white font-bold"
+          >
+            Reintentar sesión
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              window.localStorage.removeItem(SESSION_STORAGE_KEY);
+              setSessionRestoreError('');
+              setCurrentUser(null);
+            }}
+            className="w-full mt-2 py-3 rounded-xl bg-slate-100 text-slate-700 font-semibold"
+          >
+            Ir al inicio de sesión
+          </button>
         </div>
       </div>
     );
