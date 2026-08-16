@@ -8,7 +8,7 @@ interface LoginProps {
 }
 
 // 🔥 Cambiá este string  para confirmar que estás viendo el deployment correcto
-const BUILD_TAG = 'LOGIN_BUILD_2025-12-17';
+const BUILD_TAG = 'LOGIN_BUILD_2026-08-15_PIN_5MIN';
 
 const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [users, setUsers] = useState<User[]>([]);
@@ -90,7 +90,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
     }
 
     if (selectedUser.security?.lockoutUntil && selectedUser.security.lockoutUntil > Date.now()) {
-      setError('Usuario bloqueado temporalmente.');
+      setError('Demasiados intentos. Debe esperar a que finalice el bloqueo de 5 minutos.');
       return;
     }
 
@@ -110,7 +110,11 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
           setError('Demasiados intentos. Espere 5 minutos.');
         } else {
           const left = 3 - (updatedUser.security?.failedAttempts || 0);
-          setError(`PIN Incorrecto. ${left} intentos restantes.`);
+          setError(
+            left === 1
+              ? 'PIN incorrecto. Queda 1 intento.'
+              : `PIN incorrecto. Quedan ${left} intentos.`,
+          );
         }
       }
       setPin('');
@@ -303,14 +307,17 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
               className="w-full text-center text-4xl tracking-[1em] font-bold text-slate-800 border-b-2 border-slate-200 focus:border-indigo-600 focus:outline-none py-2 placeholder-slate-200"
               placeholder="••••"
               value={pin}
-              onChange={(e) => { setPin(e.target.value); setError(''); }}
+              onChange={(e) => {
+                setPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                setError('');
+              }}
             />
             {error && <p className="text-red-500 text-sm font-medium animate-pulse">{error}</p>}
             <div className="pt-4 flex gap-3">
               <button type="button" onClick={() => { setSelectedUser(null); setPin(''); setError(''); }} className="flex-1 py-3 text-slate-600 font-medium hover:bg-slate-50 rounded-lg transition-colors">
                 Atrás
               </button>
-              <button type="submit" disabled={pin.length < 1} className="flex-1 py-3 bg-indigo-600 text-white rounded-lg font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+              <button type="submit" disabled={pin.length !== 4} className="flex-1 py-3 bg-indigo-600 text-white rounded-lg font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
                 Ingresar
               </button>
             </div>
