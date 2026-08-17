@@ -856,8 +856,10 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     const rows = [
       [
         'Venta',
-        'Fecha',
+        'Fecha venta',
         'Vendedor',
+        'Cargada por',
+        'Fecha carga',
         'Producto',
         'Cantidad',
         'Precio Unitario',
@@ -886,6 +888,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
               ),
             ),
             csvEscape(sale.userName),
+            csvEscape(
+              sale.recordedByUserName || sale.userName,
+            ),
+            csvEscape(
+              sale.recordedAt
+                ? formatDateTime(sale.recordedAt)
+                : formatDateTime(sale.timestamp),
+            ),
             csvEscape(
               `${item.productName}${
                 item.color
@@ -1566,6 +1576,21 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                           <div className="font-medium">
                             {sale.userName}
                           </div>
+
+                          {isAdmin &&
+                            sale.recordedByUserName &&
+                            (sale.recordedByUserId !== sale.userId ||
+                              (sale.recordedAt &&
+                                Math.abs(
+                                  sale.recordedAt - sale.timestamp,
+                                ) > 60_000)) && (
+                              <div className="text-[11px] text-slate-400 mt-1">
+                                Cargada por {sale.recordedByUserName}
+                                {sale.recordedAt
+                                  ? ` · ${formatDateTime(sale.recordedAt)}`
+                                  : ''}
+                              </div>
+                            )}
                         </Td>
 
                         <Td>
