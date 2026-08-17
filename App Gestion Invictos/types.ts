@@ -115,6 +115,11 @@ export interface SaleItem {
   quantity: number;
   priceAtSale: number;
 
+  // Costo unitario real del producto al momento de confirmar la venta.
+  // Queda congelado para que un cambio de costo futuro no altere
+  // la rentabilidad histórica.
+  costAtSale?: number;
+
   // Total bruto de la línea antes del descuento.
   originalSubtotal?: number;
 
@@ -161,6 +166,40 @@ export interface Sale {
   userName: string;
   commissionPaid?: boolean;
   commissionPaidDate?: number;
+}
+
+export type ExpenseCategory =
+  | 'rent'
+  | 'energy'
+  | 'staff'
+  | 'taxes'
+  | 'services'
+  | 'marketing'
+  | 'transport'
+  | 'maintenance'
+  | 'other';
+
+export interface Expense {
+  id: string;
+
+  // Mes contable al que corresponde el gasto, formato YYYY-MM.
+  // Ej.: una factura pagada en septiembre puede imputarse a agosto.
+  periodMonth: string;
+
+  // Fecha real de pago, solo informativa. Puede quedar vacía.
+  paymentDate?: number;
+
+  category: ExpenseCategory;
+  description: string;
+  amount: number;
+  notes?: string;
+
+  createdByUserId: string;
+  createdByUserName: string;
+
+  // Fecha/hora real en que se cargó el registro en INVICTOS.
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export type InventoryMovementType =
