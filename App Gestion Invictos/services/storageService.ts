@@ -591,6 +591,119 @@ export const StorageService = {
     );
   },
 
+  /**
+   * Alta masiva de variantes de un producto.
+   * Se usa únicamente desde "Nuevo Producto".
+   *
+   * Todas las variantes siguen siendo documentos Product independientes,
+   * pero se guardan juntas y comparten parentProductId.
+   */
+  saveProductsBatch: async (products: Product[]): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    if (!products.length) {
+      throw new Error('No hay variantes para guardar.');
+    }
+
+    if (products.length > 400) {
+      throw new Error(
+        'La carga masiva admite hasta 400 variantes por producto.',
+      );
+    }
+
+    const currentSnapshot = await getDocs(
+      collection(db, COLLECTIONS.PRODUCTS),
+    );
+
+    const existingCodes = new Set<string>();
+    const existingShortCodes = new Set<string>();
+    const existingBarcodes = new Set<string>();
+
+    currentSnapshot.docs.forEach((productDoc) => {
+      const data = productDoc.data() as Product;
+
+      const code = (data.code || '').trim().toLowerCase();
+      const shortCode = (data.shortCode || '').trim();
+      const barcode = (data.barcode || '').trim();
+
+      if (code) existingCodes.add(code);
+      if (shortCode) existingShortCodes.add(shortCode);
+      if (barcode) existingBarcodes.add(barcode);
+    });
+
+    const newIds = new Set<string>();
+    const newCodes = new Set<string>();
+    const newShortCodes = new Set<string>();
+    const newBarcodes = new Set<string>();
+
+    products.forEach((product) => {
+      const id = (product.id || '').trim();
+      const code = (product.code || '').trim().toLowerCase();
+      const shortCode = normalizeShortCode(product.shortCode || '');
+      const barcode = normalizeBarcode(product.barcode || '');
+
+      if (!id || !code || !shortCode || !barcode) {
+        throw new Error(
+          'Una de las variantes no tiene identificación completa.',
+        );
+      }
+
+      if (newIds.has(id)) {
+        throw new Error('Se generó un identificador de variante duplicado.');
+      }
+
+      if (existingCodes.has(code) || newCodes.has(code)) {
+        throw new Error(`El SKU "${product.code}" ya existe.`);
+      }
+
+      if (
+        existingShortCodes.has(shortCode) ||
+        newShortCodes.has(shortCode)
+      ) {
+        throw new Error(
+          `El código corto "${shortCode}" ya existe.`,
+        );
+      }
+
+      if (
+        existingBarcodes.has(barcode) ||
+        newBarcodes.has(barcode)
+      ) {
+        throw new Error(
+          `El código de barras "${barcode}" ya existe.`,
+        );
+      }
+
+      newIds.add(id);
+      newCodes.add(code);
+      newShortCodes.add(shortCode);
+      newBarcodes.add(barcode);
+    });
+
+    const batch = writeBatch(db);
+    const now = Date.now();
+
+    products.forEach((product) => {
+      const data: any = cleanData({
+        ...product,
+        shortCode: normalizeShortCode(product.shortCode || ''),
+        barcode: normalizeBarcode(product.barcode || ''),
+        active: product.active !== false,
+        createdAt: product.createdAt || now,
+        updatedAt: now,
+      });
+
+      delete data.commissionPercentage;
+
+      batch.set(
+        doc(db, COLLECTIONS.PRODUCTS, product.id),
+        data,
+      );
+    });
+
+    await batch.commit();
+  },
+
   updateProductCost: async (
     productId: string,
     newCost: number,
