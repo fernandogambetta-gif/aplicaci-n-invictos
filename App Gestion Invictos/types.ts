@@ -206,8 +206,15 @@ export interface Sale {
   // Solo existe cuando parte o toda la venta queda a cuenta corriente.
   receivable?: Receivable;
 
+  // Usuario al que se imputa la venta (quien realmente la realizó).
   userId: string;
   userName: string;
+
+  // Trazabilidad de la carga administrativa.
+  recordedAt?: number;
+  recordedByUserId?: string;
+  recordedByUserName?: string;
+
   commissionPaid?: boolean;
   commissionPaidDate?: number;
 }
