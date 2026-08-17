@@ -36,6 +36,14 @@ interface InventoryProps {
   onUpdate: () => void | Promise<void>;
 }
 
+interface VariantDraft {
+  key: string;
+  size: string;
+  color: string;
+  stock: number;
+  enabled: boolean;
+}
+
 /**
  * Portal fuera del componente:
  * evita que el modal se desmonte/monte en cada render y pierda el foco.
@@ -75,6 +83,17 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
   const [newCategoryName, setNewCategoryName] = useState('');
 
   const [formError, setFormError] = useState('');
+
+  // Alta masiva de variantes desde el único botón "Nuevo Producto".
+  const [newProductSizes, setNewProductSizes] = useState<string[]>([]);
+  const [newProductColors, setNewProductColors] = useState<string[]>([]);
+  const [newSizeInput, setNewSizeInput] = useState('');
+  const [newColorInput, setNewColorInput] = useState('');
+  const [variantDrafts, setVariantDrafts] = useState<VariantDraft[]>([]);
+
+  // Combinaciones eliminadas manualmente durante el alta.
+  // Se mantienen fuera de la matriz aunque cambie el stock de otras variantes.
+  const [excludedVariantKeys, setExcludedVariantKeys] = useState<string[]>([]);
 
   // Form State for Products
   const [formData, setFormData] = useState<Partial<Product>>({
@@ -241,6 +260,140 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     commissionPercentage: undefined,
   });
 
+  const normalizeVariantValue = (value: string): string =>
+    value.trim().replace(/\s+/g, ' ');
+
+  const variantKey = (size: string, color: string): string =>
+    `${normalizeVariantValue(size).toLowerCase()}||${normalizeVariantValue(
+      color,
+    ).toLowerCase()}`;
+
+  const addSize = () => {
+    const value = normalizeVariantValue(newSizeInput);
+
+    if (!value) return;
+
+    if (
+      newProductSizes.some(
+        (item) => item.toLowerCase() === value.toLowerCase(),
+      )
+    ) {
+      setNewSizeInput('');
+      return;
+    }
+
+    setNewProductSizes((prev) => [...prev, value]);
+    setNewSizeInput('');
+  };
+
+  const addColor = () => {
+    const value = normalizeVariantValue(newColorInput);
+
+    if (!value) return;
+
+    if (
+      newProductColors.some(
+        (item) => item.toLowerCase() === value.toLowerCase(),
+      )
+    ) {
+      setNewColorInput('');
+      return;
+    }
+
+    setNewProductColors((prev) => [...prev, value]);
+    setNewColorInput('');
+  };
+
+  const removeSize = (size: string) => {
+    setNewProductSizes((prev) =>
+      prev.filter((item) => item !== size),
+    );
+  };
+
+  const removeColor = (color: string) => {
+    setNewProductColors((prev) =>
+      prev.filter((item) => item !== color),
+    );
+  };
+
+  // Construye automáticamente talle × color.
+  // Si no se carga talle ni color, queda una única variante "sin variante".
+  useEffect(() => {
+    if (!isModalOpen || formData.id) return;
+
+    const sizes =
+      newProductSizes.length > 0 ? newProductSizes : [''];
+
+    const colors =
+      newProductColors.length > 0 ? newProductColors : [''];
+
+    const combinations = sizes
+      .flatMap((size) =>
+        colors.map((color) => ({
+          key: variantKey(size, color),
+          size,
+          color,
+        })),
+      )
+      .filter(
+        (combination) =>
+          !excludedVariantKeys.includes(combination.key),
+      );
+
+    setVariantDrafts((previous) => {
+      const previousMap = new Map(
+        previous.map((variant) => [variant.key, variant]),
+      );
+
+      return combinations.map((combination) => {
+        const existing = previousMap.get(combination.key);
+
+        if (existing) {
+          return {
+            ...existing,
+            size: combination.size,
+            color: combination.color,
+          };
+        }
+
+        return {
+          ...combination,
+          stock: 0,
+          enabled: true,
+        };
+      });
+    });
+  }, [
+    isModalOpen,
+    formData.id,
+    newProductSizes,
+    newProductColors,
+    excludedVariantKeys,
+  ]);
+
+  const deleteVariantCombination = (key: string) => {
+    setExcludedVariantKeys((prev) =>
+      prev.includes(key) ? prev : [...prev, key],
+    );
+
+    setVariantDrafts((prev) =>
+      prev.filter((variant) => variant.key !== key),
+    );
+  };
+
+  const restoreVariantCombinations = () => {
+    setExcludedVariantKeys([]);
+  };
+
+  const activeVariantDrafts = variantDrafts.filter(
+    (variant) => variant.enabled,
+  );
+
+  const activeVariantUnits = activeVariantDrafts.reduce(
+    (total, variant) => total + Number(variant.stock || 0),
+    0,
+  );
+
   const resetForm = useCallback(() => {
     setFormData({
       name: '',
@@ -261,11 +414,23 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       active: true,
       commissionPercentage: undefined,
     });
+    setNewProductSizes([]);
+    setNewProductColors([]);
+    setNewSizeInput('');
+    setNewColorInput('');
+    setVariantDrafts([]);
+    setExcludedVariantKeys([]);
     setFormError('');
   }, [categories, providers]);
 
   const handleOpenNewProduct = () => {
     setFormError('');
+    setNewProductSizes([]);
+    setNewProductColors([]);
+    setNewSizeInput('');
+    setNewColorInput('');
+    setVariantDrafts([]);
+    setExcludedVariantKeys([]);
     setFormData(buildEmptyForm());
     setIsModalOpen(true);
   };
@@ -276,36 +441,17 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
   const handleSave = async () => {
     const name = (formData.name || '').trim();
-    const code = (formData.code || '').trim();
-    const shortCode = (formData.shortCode || '').replace(/\D/g, '').trim();
-    const barcodeValue = (formData.barcode || '').trim();
     const category = formData.category || '';
     const provider = formData.provider || '';
 
     const price = Number(formData.price);
     const cost = Number(formData.cost ?? 0);
-    const stock = Number(formData.stock ?? 0);
     const minStock = Number(formData.minStock ?? 0);
 
     setFormError('');
 
     if (!name || !category || !provider) {
       setFormError('Completá nombre, categoría y proveedor.');
-      return;
-    }
-
-    if (!code) {
-      setFormError('El producto debe tener un código / SKU.');
-      return;
-    }
-
-    if (!/^\d{4,6}$/.test(shortCode)) {
-      setFormError('El código corto / QR debe tener entre 4 y 6 números.');
-      return;
-    }
-
-    if (!barcodeValue) {
-      setFormError('El producto debe tener un código de barras.');
       return;
     }
 
@@ -319,49 +465,172 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       return;
     }
 
-    if (!Number.isFinite(stock) || stock < 0) {
-      setFormError('El stock no puede ser negativo.');
-      return;
-    }
-
     if (!Number.isFinite(minStock) || minStock < 0) {
       setFormError('El stock mínimo no puede ser negativo.');
       return;
     }
 
-    const duplicateCode = products.find(
-      (p) =>
-        p.id !== formData.id &&
-        (p.code || '').trim().toLowerCase() === code.toLowerCase(),
-    );
+    // ======================================================
+    // EDICIÓN: sigue siendo individual, como hasta ahora.
+    // ======================================================
+    if (formData.id) {
+      const code = (formData.code || '').trim();
+      const shortCode = (formData.shortCode || '')
+        .replace(/\D/g, '')
+        .trim();
+      const barcodeValue = (formData.barcode || '').trim();
 
-    if (duplicateCode) {
-      setFormError(`El SKU "${code}" ya está usado por "${duplicateCode.name}".`);
+      if (!code) {
+        setFormError('El producto debe tener un código / SKU.');
+        return;
+      }
+
+      if (!/^\d{4,6}$/.test(shortCode)) {
+        setFormError(
+          'El código corto / QR debe tener entre 4 y 6 números.',
+        );
+        return;
+      }
+
+      if (!barcodeValue) {
+        setFormError(
+          'El producto debe tener un código de barras.',
+        );
+        return;
+      }
+
+      const duplicateCode = products.find(
+        (p) =>
+          p.id !== formData.id &&
+          (p.code || '').trim().toLowerCase() ===
+            code.toLowerCase(),
+      );
+
+      if (duplicateCode) {
+        setFormError(
+          `El SKU "${code}" ya está usado por "${duplicateCode.name}".`,
+        );
+        return;
+      }
+
+      const duplicateShortCode = products.find(
+        (p) =>
+          p.id !== formData.id &&
+          (p.shortCode || '').trim() === shortCode,
+      );
+
+      if (duplicateShortCode) {
+        setFormError(
+          `El código corto "${shortCode}" ya está usado por "${duplicateShortCode.name}".`,
+        );
+        return;
+      }
+
+      const duplicateBarcode = products.find(
+        (p) =>
+          p.id !== formData.id &&
+          (p.barcode || '').trim() === barcodeValue,
+      );
+
+      if (duplicateBarcode) {
+        setFormError(
+          `El código de barras "${barcodeValue}" ya está usado por "${duplicateBarcode.name}".`,
+        );
+        return;
+      }
+
+      setIsSaving(true);
+
+      try {
+        const currentProduct = products.find(
+          (p) => p.id === formData.id,
+        );
+
+        const updatedProduct: Product = {
+          id: formData.id,
+          code,
+          shortCode,
+          barcode: barcodeValue,
+          parentProductId: formData.parentProductId,
+          name,
+          category,
+          provider,
+          price,
+          cost,
+          stock: Number(currentProduct?.stock ?? 0),
+          minStock,
+          size: (formData.size || '').trim(),
+          color: (formData.color || '').trim(),
+          gender: (formData.gender || '').trim(),
+          description: (formData.description as string) || '',
+          salesNote: (formData.salesNote as string) || '',
+          active: formData.active !== false,
+          createdAt: formData.createdAt,
+          updatedAt: formData.updatedAt,
+          commissionPercentage: formData.commissionPercentage,
+        };
+
+        await StorageService.saveProduct(updatedProduct);
+        await Promise.resolve(onUpdate());
+
+        setIsModalOpen(false);
+        resetForm();
+      } catch (error: any) {
+        console.error('Error guardando producto:', error);
+        setFormError(
+          error?.message || 'No se pudo guardar el producto.',
+        );
+      } finally {
+        setIsSaving(false);
+      }
+
       return;
     }
 
-    const duplicateShortCode = products.find(
-      (p) =>
-        p.id !== formData.id &&
-        (p.shortCode || '').trim() === shortCode,
-    );
-
-    if (duplicateShortCode) {
+    // ======================================================
+    // NUEVO PRODUCTO: alta conjunta de todas las variantes.
+    // ======================================================
+    if (!activeVariantDrafts.length) {
       setFormError(
-        `El código corto "${shortCode}" ya está usado por "${duplicateShortCode.name}".`,
+        'Debe quedar al menos una combinación de talle/color para crear.',
       );
       return;
     }
 
-    const duplicateBarcode = products.find(
-      (p) =>
-        p.id !== formData.id &&
-        (p.barcode || '').trim() === barcodeValue,
+    const invalidStock = activeVariantDrafts.find(
+      (variant) =>
+        !Number.isFinite(Number(variant.stock)) ||
+        Number(variant.stock) < 0,
     );
 
-    if (duplicateBarcode) {
+    if (invalidStock) {
       setFormError(
-        `El código de barras "${barcodeValue}" ya está usado por "${duplicateBarcode.name}".`,
+        'La cantidad inicial de cada variante debe ser cero o mayor.',
+      );
+      return;
+    }
+
+    // Impide duplicar una combinación ya existente con el mismo nombre.
+    const duplicatedCombination = activeVariantDrafts.find(
+      (variant) =>
+        products.some(
+          (product) =>
+            (product.name || '').trim().toLowerCase() ===
+              name.toLowerCase() &&
+            (product.size || '').trim().toLowerCase() ===
+              variant.size.trim().toLowerCase() &&
+            (product.color || '').trim().toLowerCase() ===
+              variant.color.trim().toLowerCase(),
+        ),
+    );
+
+    if (duplicatedCombination) {
+      setFormError(
+        `Ya existe "${name}" con talle "${
+          duplicatedCombination.size || 'sin talle'
+        }" y color "${
+          duplicatedCombination.color || 'sin color'
+        }".`,
       );
       return;
     }
@@ -369,48 +638,138 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
     setIsSaving(true);
 
     try {
-      // En edición no permitimos cambiar stock desde la ficha.
-      // El stock se modifica desde "Ingresar Mercadería".
-      const currentProduct = formData.id
-        ? products.find((p) => p.id === formData.id)
-        : undefined;
+      const familyId = `family-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
 
-      const finalStock = formData.id
-        ? Number(currentProduct?.stock ?? 0)
-        : stock;
+      const reservedShortCodes = new Set(
+        products
+          .map((product) => (product.shortCode || '').trim())
+          .filter(Boolean),
+      );
 
-      const newProduct: Product = {
-        id: formData.id || Date.now().toString(),
-        code,
-        shortCode,
-        barcode: barcodeValue,
-        parentProductId: formData.parentProductId,
-        name,
-        category,
-        provider,
-        price,
-        cost,
-        stock: finalStock,
-        minStock,
-        size: (formData.size || '').trim(),
-        color: (formData.color || '').trim(),
-        gender: (formData.gender || '').trim(),
-        description: (formData.description as string) || '',
-        salesNote: (formData.salesNote as string) || '',
-        active: formData.active !== false,
-        createdAt: formData.createdAt,
-        updatedAt: formData.updatedAt,
-        commissionPercentage: formData.commissionPercentage,
+      const reservedCodes = new Set(
+        products
+          .map((product) =>
+            (product.code || '').trim().toUpperCase(),
+          )
+          .filter(Boolean),
+      );
+
+      const reservedBarcodes = new Set(
+        products
+          .map((product) => (product.barcode || '').trim())
+          .filter(Boolean),
+      );
+
+      let nextShortCode = 1000;
+
+      const takeShortCode = (): string => {
+        while (
+          reservedShortCodes.has(String(nextShortCode))
+        ) {
+          nextShortCode += 1;
+        }
+
+        const result = String(nextShortCode);
+        reservedShortCodes.add(result);
+        nextShortCode += 1;
+        return result;
       };
 
-      await StorageService.saveProduct(newProduct);
+      const takeSku = (index: number): string => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const candidate = `INV-${String(
+            Date.now() + index * 100 + attempt,
+          ).slice(-7)}`;
+
+          if (!reservedCodes.has(candidate.toUpperCase())) {
+            reservedCodes.add(candidate.toUpperCase());
+            return candidate;
+          }
+        }
+
+        const fallback = `INV-${Date.now()}-${index + 1}`;
+        reservedCodes.add(fallback.toUpperCase());
+        return fallback;
+      };
+
+      const takeBarcode = (index: number): string => {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const timePart = String(
+            Date.now() + index * 100 + attempt,
+          ).slice(-8);
+
+          const randomPart = String(
+            Math.floor(Math.random() * 100),
+          ).padStart(2, '0');
+
+          const base12 = `20${timePart}${randomPart}`;
+          const candidate = `${base12}${calculateEanCheckDigit(
+            base12,
+          )}`;
+
+          if (!reservedBarcodes.has(candidate)) {
+            reservedBarcodes.add(candidate);
+            return candidate;
+          }
+        }
+
+        const base12 = `20${String(
+          Date.now() + index,
+        ).slice(-10)}`;
+
+        const fallback = `${base12}${calculateEanCheckDigit(
+          base12,
+        )}`;
+
+        reservedBarcodes.add(fallback);
+        return fallback;
+      };
+
+      const createdAt = Date.now();
+
+      const newProducts: Product[] = activeVariantDrafts.map(
+        (variant, index) => ({
+          id: `${createdAt}-${index}-${Math.random()
+            .toString(36)
+            .slice(2, 7)}`,
+          code: takeSku(index),
+          shortCode: takeShortCode(),
+          barcode: takeBarcode(index),
+          parentProductId: familyId,
+
+          name,
+          category,
+          provider,
+          price,
+          cost,
+          stock: Math.max(0, Number(variant.stock || 0)),
+          minStock,
+
+          size: variant.size.trim(),
+          color: variant.color.trim(),
+          gender: (formData.gender || '').trim(),
+          description: (formData.description as string) || '',
+          salesNote: (formData.salesNote as string) || '',
+          active: formData.active !== false,
+          createdAt,
+          updatedAt: createdAt,
+          commissionPercentage: formData.commissionPercentage,
+        }),
+      );
+
+      await StorageService.saveProductsBatch(newProducts);
       await Promise.resolve(onUpdate());
 
       setIsModalOpen(false);
       resetForm();
     } catch (error: any) {
-      console.error('Error guardando producto:', error);
-      setFormError(error?.message || 'No se pudo guardar el producto.');
+      console.error('Error creando producto y variantes:', error);
+      setFormError(
+        error?.message ||
+          'No se pudieron crear las variantes del producto.',
+      );
     } finally {
       setIsSaving(false);
     }
@@ -425,6 +784,12 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
 
   const handleEdit = (product: Product) => {
     setFormError('');
+    setNewProductSizes([]);
+    setNewProductColors([]);
+    setNewSizeInput('');
+    setNewColorInput('');
+    setVariantDrafts([]);
+    setExcludedVariantKeys([]);
     setFormData({
       ...product,
       minStock: product.minStock ?? 3,
@@ -1361,15 +1726,17 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
       {/* PRODUCT MODAL */}
       {isModalOpen && (
         <Portal>
-          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full overflow-hidden animate-fade-in-up">
-              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+          <div className="fixed inset-0 bg-black/50 z-[9999] sm:flex sm:items-center sm:justify-center sm:p-4">
+            <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-4xl sm:rounded-xl shadow-xl overflow-hidden animate-fade-in-up flex flex-col">
+              <div className="shrink-0 px-4 sm:px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <div>
                   <h3 className="text-lg font-bold text-slate-800">
                     {formData.id ? 'Editar Producto' : 'Nuevo Producto'}
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Cada variante tiene SKU, código corto QR y código de barras propio.
+                    {formData.id
+                      ? 'Edición individual de la variante.'
+                      : 'Cargá una vez el modelo y definí debajo todos sus talles, colores y cantidades.'}
                   </p>
                 </div>
 
@@ -1382,7 +1749,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                 </button>
               </div>
 
-              <div className="p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-5">
                 {formError && (
                   <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-start gap-2">
                     <AlertTriangle size={18} className="mt-0.5 shrink-0" />
@@ -1391,6 +1758,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                 )}
 
                 {/* IDENTIFICACIÓN */}
+                {formData.id ? (
                 <div className="border border-slate-200 rounded-xl p-4">
                   <h4 className="font-semibold text-slate-800 flex items-center gap-2 mb-4">
                     <Barcode size={18} className="text-indigo-600" />
@@ -1512,6 +1880,21 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     </div>
                   </div>
                 </div>
+
+                ) : (
+                  <div className="border border-indigo-200 bg-indigo-50 rounded-xl p-4">
+                    <div className="font-semibold text-indigo-900 flex items-center gap-2">
+                      <Barcode size={18} />
+                      Identificación automática
+                    </div>
+
+                    <p className="text-sm text-indigo-700 mt-2">
+                      INVICTOS generará automáticamente un SKU, un código corto QR
+                      y un código de barras diferente para cada combinación de talle
+                      y color. Luego podrás editar cada variante individualmente.
+                    </p>
+                  </div>
+                )}
 
                 {/* DATOS DEL PRODUCTO */}
                 <div className="border border-slate-200 rounded-xl p-4">
@@ -1641,66 +2024,337 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                   </div>
                 </div>
 
-                {/* VARIANTE */}
-                <div className="border border-slate-200 rounded-xl p-4">
-                  <h4 className="font-semibold text-slate-800 mb-1">
-                    Variante
-                  </h4>
+                {/* VARIANTES */}
+                {!formData.id ? (
+                  <div className="border border-indigo-200 rounded-xl overflow-hidden">
+                    <div className="p-4 bg-indigo-50 border-b border-indigo-100">
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div>
+                          <h4 className="font-bold text-indigo-900 flex items-center gap-2">
+                            <Shirt size={18} />
+                            Talles, colores y cantidades
+                          </h4>
 
-                  <p className="text-xs text-slate-500 mb-4">
-                    Para prendas, cada talle y color se controla como una unidad de stock independiente.
-                  </p>
+                          <p className="text-xs text-indigo-700 mt-1">
+                            Agregá los talles y colores disponibles. INVICTOS crea
+                            automáticamente todas las combinaciones como productos
+                            independientes.
+                          </p>
+                        </div>
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                        <Shirt size={14} />
-                        Talle
-                      </label>
-
-                      <input
-                        type="text"
-                        placeholder="Ej.: S, M, L, XL, 40..."
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        value={formData.size || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            size: e.target.value,
-                          })
-                        }
-                      />
+                        <div className="text-xs font-bold text-indigo-700 bg-white border border-indigo-200 rounded-lg px-3 py-2 whitespace-nowrap">
+                          {activeVariantDrafts.length}{' '}
+                          {activeVariantDrafts.length === 1
+                            ? 'variante'
+                            : 'variantes'}
+                          {' · '}
+                          {activeVariantUnits} unidad(es)
+                        </div>
+                      </div>
                     </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                        <Palette size={14} />
-                        Color
-                      </label>
+                    <div className="p-4 space-y-5">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div>
+                          <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1">
+                            <Shirt size={14} />
+                            Talles
+                          </label>
 
-                      <input
-                        type="text"
-                        placeholder="Ej.: Negro, Azul Francia..."
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        value={formData.color || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            color: e.target.value,
-                          })
-                        }
-                      />
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={newSizeInput}
+                              onChange={(e) =>
+                                setNewSizeInput(e.target.value)
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  addSize();
+                                }
+                              }}
+                              placeholder="Ej.: S, M, L, 40..."
+                              className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+
+                            <button
+                              type="button"
+                              onClick={addSize}
+                              className="px-3 py-2 rounded-lg bg-slate-900 text-white font-semibold flex items-center gap-1"
+                            >
+                              <Plus size={16} />
+                              Agregar
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            {newProductSizes.length === 0 && (
+                              <span className="text-xs text-slate-400">
+                                Si no agregás talles, se crea como talle único.
+                              </span>
+                            )}
+
+                            {newProductSizes.map((size) => (
+                              <span
+                                key={size}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-100 text-slate-700 text-xs font-bold"
+                              >
+                                {size}
+
+                                <button
+                                  type="button"
+                                  onClick={() => removeSize(size)}
+                                  className="text-slate-400 hover:text-red-600"
+                                  title={`Quitar talle ${size}`}
+                                >
+                                  <X size={13} />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1">
+                            <Palette size={14} />
+                            Colores
+                          </label>
+
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={newColorInput}
+                              onChange={(e) =>
+                                setNewColorInput(e.target.value)
+                              }
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  addColor();
+                                }
+                              }}
+                              placeholder="Ej.: Negro, Blanco..."
+                              className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+
+                            <button
+                              type="button"
+                              onClick={addColor}
+                              className="px-3 py-2 rounded-lg bg-slate-900 text-white font-semibold flex items-center gap-1"
+                            >
+                              <Plus size={16} />
+                              Agregar
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            {newProductColors.length === 0 && (
+                              <span className="text-xs text-slate-400">
+                                Si no agregás colores, se crea sin color específico.
+                              </span>
+                            )}
+
+                            {newProductColors.map((color) => (
+                              <span
+                                key={color}
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-slate-100 text-slate-700 text-xs font-bold"
+                              >
+                                {color}
+
+                                <button
+                                  type="button"
+                                  onClick={() => removeColor(color)}
+                                  className="text-slate-400 hover:text-red-600"
+                                  title={`Quitar color ${color}`}
+                                >
+                                  <X size={13} />
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between gap-3 mb-2">
+                          <div>
+                            <div className="font-semibold text-slate-800">
+                              Combinaciones a crear
+                            </div>
+
+                            <div className="text-xs text-slate-500 mt-0.5">
+                              Eliminá las combinaciones que no existan. En cada
+                              combinación restante cargá la cantidad de stock inicial.
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="border border-slate-200 rounded-xl overflow-hidden">
+                          <div className="hidden sm:grid grid-cols-[1fr_1fr_150px_56px] gap-2 bg-slate-50 border-b border-slate-200 px-3 py-2 text-[11px] uppercase tracking-wide font-bold text-slate-500">
+                            <div>Talle</div>
+                            <div>Color</div>
+                            <div className="text-right">Stock inicial</div>
+                            <div className="text-center">Quitar</div>
+                          </div>
+
+                          <div className="divide-y divide-slate-100 max-h-[330px] overflow-y-auto">
+                            {variantDrafts.map((variant) => (
+                              <div
+                                key={variant.key}
+                                className="grid grid-cols-[1fr_105px_42px] sm:grid-cols-[1fr_1fr_150px_56px] gap-2 items-center px-3 py-3 bg-white"
+                              >
+                                <div className="min-w-0">
+                                  <div className="sm:hidden text-[10px] uppercase font-bold text-slate-400">
+                                    Variante
+                                  </div>
+
+                                  <div className="font-semibold text-slate-800 truncate">
+                                    {variant.size || 'Talle único'}
+                                    <span className="sm:hidden text-slate-400 font-normal">
+                                      {' · '}
+                                      {variant.color || 'Sin color'}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="hidden sm:block font-medium text-slate-700 truncate">
+                                  {variant.color || 'Sin color'}
+                                </div>
+
+                                <div>
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={variant.stock}
+                                    onChange={(e) =>
+                                      setVariantDrafts((prev) =>
+                                        prev.map((item) =>
+                                          item.key === variant.key
+                                            ? {
+                                                ...item,
+                                                stock: Math.max(
+                                                  0,
+                                                  parseInt(
+                                                    e.target.value,
+                                                    10,
+                                                  ) || 0,
+                                                ),
+                                              }
+                                            : item,
+                                        ),
+                                      )
+                                    }
+                                    className="w-full border border-slate-300 rounded-lg px-2 py-2 text-right font-bold"
+                                    aria-label={`Stock inicial ${variant.size} ${variant.color}`}
+                                  />
+                                </div>
+
+                                <div className="flex justify-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      deleteVariantCombination(variant.key)
+                                    }
+                                    className="p-2 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700"
+                                    title={`Eliminar ${variant.size || 'talle único'} / ${variant.color || 'sin color'}`}
+                                  >
+                                    <Trash2 size={17} />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {excludedVariantKeys.length > 0 && (
+                          <div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                            <div className="text-sm text-amber-800">
+                              Eliminaste <b>{excludedVariantKeys.length}</b>{' '}
+                              combinación(es). No se crearán.
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={restoreVariantCombinations}
+                              className="text-xs font-bold px-3 py-2 rounded-lg bg-white border border-amber-300 text-amber-800 hover:bg-amber-100"
+                            >
+                              Restaurar combinaciones
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="mt-3 bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800">
+                          Se crearán <b>{activeVariantDrafts.length}</b>{' '}
+                          producto(s) independientes con un total inicial de{' '}
+                          <b>{activeVariantUnits}</b> unidad(es). Todos quedarán
+                          vinculados al mismo modelo <b>{formData.name || 'nuevo producto'}</b>.
+                        </div>
+                      </div>
                     </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="border border-slate-200 rounded-xl p-4">
+                    <h4 className="font-semibold text-slate-800 mb-1">
+                      Variante
+                    </h4>
+
+                    <p className="text-xs text-slate-500 mb-4">
+                      Estás editando una variante individual. Esto no modifica
+                      las demás combinaciones del mismo producto.
+                    </p>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
+                          <Shirt size={14} />
+                          Talle
+                        </label>
+
+                        <input
+                          type="text"
+                          className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          value={formData.size || ''}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              size: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
+                          <Palette size={14} />
+                          Color
+                        </label>
+
+                        <input
+                          type="text"
+                          className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                          value={formData.color || ''}
+                          onChange={(e) =>
+                            setFormData({
+                              ...formData,
+                              color: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* PRECIOS Y STOCK */}
                 <div className="border border-slate-200 rounded-xl p-4">
                   <h4 className="font-semibold text-slate-800 mb-4">
-                    Precio y Stock
+                    Precio y costo
                   </h4>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className={`grid grid-cols-1 ${
+                    formData.id ? 'md:grid-cols-3' : 'md:grid-cols-2'
+                  } gap-4`}>
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">
                         Costo ($)
@@ -1714,8 +2368,7 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                         onChange={(e) =>
                           setFormData({
                             ...formData,
-                            cost:
-                              parseFloat(e.target.value) || 0,
+                            cost: parseFloat(e.target.value) || 0,
                           })
                         }
                       />
@@ -1734,44 +2387,39 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                         onChange={(e) =>
                           setFormData({
                             ...formData,
-                            price:
-                              parseFloat(e.target.value) || 0,
+                            price: parseFloat(e.target.value) || 0,
                           })
                         }
                       />
                     </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-slate-700 mb-1">
-                        {formData.id ? 'Stock actual' : 'Stock inicial'}
-                      </label>
+                    {formData.id && (
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">
+                          Stock actual
+                        </label>
 
-                      <input
-                        type="number"
-                        min="0"
-                        disabled={Boolean(formData.id)}
-                        className={`w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none ${
-                          formData.id
-                            ? 'bg-slate-100 text-slate-500 cursor-not-allowed'
-                            : ''
-                        }`}
-                        value={Number(formData.stock ?? 0)}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            stock:
-                              parseInt(e.target.value, 10) || 0,
-                          })
-                        }
-                      />
+                        <input
+                          type="number"
+                          min="0"
+                          disabled
+                          className="w-full border border-slate-300 rounded-lg p-2 bg-slate-100 text-slate-500 cursor-not-allowed"
+                          value={Number(formData.stock ?? 0)}
+                        />
 
-                      {formData.id && (
                         <p className="text-[11px] text-slate-400 mt-1">
                           Para cambiar stock usá “Ingresar Mercadería”.
                         </p>
-                      )}
-                    </div>
+                      </div>
+                    )}
                   </div>
+
+                  {!formData.id && (
+                    <p className="text-[11px] text-slate-400 mt-3">
+                      El costo y precio se aplican inicialmente a todas las
+                      variantes. Las cantidades se cargan arriba, por talle/color.
+                    </p>
+                  )}
                 </div>
 
                 <div>
@@ -1818,11 +2466,17 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                 </div>
               </div>
 
-              <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex flex-col-reverse sm:flex-row sm:justify-between gap-3">
+              <div
+                className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 bg-slate-50 border-t border-slate-100 flex flex-col-reverse sm:flex-row sm:justify-between gap-3"
+                style={{
+                  paddingBottom:
+                    'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+                }}
+              >
                 <div className="text-xs text-slate-400 self-center">
                   {formData.id
-                    ? 'Editar la ficha no modifica el stock.'
-                    : 'SKU y código de barras se generan automáticamente, pero pueden editarse.'}
+                    ? 'Editar esta ficha no modifica las demás variantes.'
+                    : `${activeVariantDrafts.length} variante(s) seleccionada(s) · ${activeVariantUnits} unidad(es) iniciales.`}
                 </div>
 
                 <div className="flex justify-end gap-3 flex-wrap">
@@ -1864,7 +2518,11 @@ const Inventory: React.FC<InventoryProps> = ({ products, onUpdate }) => {
                     ) : (
                       <Save size={18} />
                     )}
-                    Guardar
+                    {formData.id
+                      ? 'Guardar'
+                      : activeVariantDrafts.length === 1
+                        ? 'Crear Producto'
+                        : `Crear ${activeVariantDrafts.length} Variantes`}
                   </button>
                 </div>
               </div>
