@@ -101,8 +101,10 @@ const money = (value: number): string =>
 
 const paymentLabel = (method: PaymentMethod | 'mixed'): string => {
   if (method === 'cash') return 'Efectivo';
+  if (method === 'debit') return 'Débito';
   if (method === 'card') return 'Tarjeta';
   if (method === 'transfer') return 'Transferencia';
+  if (method === 'account') return 'Cuenta corriente';
   return 'Pago mixto';
 };
 
@@ -295,10 +297,40 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
       doc.text(`Forma de pago: ${paymentLabel(sale.paymentMethod)}`, left, y);
       y += 5;
 
-      if (sale.paymentMethod === 'mixed' && sale.payments?.length) {
+      if (sale.payments?.length) {
         sale.payments.forEach((payment) => {
+          const receiptText = payment.receiptNumber
+            ? ` · Comp. ${payment.receiptNumber}`
+            : '';
+
           doc.text(
-            `• ${paymentLabel(payment.method)}: $${money(payment.amount)}`,
+            `• ${paymentLabel(payment.method)}: $${money(payment.amount)}${receiptText}`,
+            left + 4,
+            y,
+          );
+          y += 4.5;
+        });
+      }
+
+      if (sale.receivable) {
+        ensureSpace(26);
+
+        y += 3;
+        doc.setFont('helvetica', 'bold');
+        doc.text(
+          `Cuenta corriente: ${sale.receivable.customerName}`,
+          left,
+          y,
+        );
+        y += 5;
+
+        doc.setFont('helvetica', 'normal');
+
+        sale.receivable.installments.forEach((installment) => {
+          doc.text(
+            `Cuota ${installment.number}: $${money(installment.amount)} · vence ${new Date(
+              installment.dueDate,
+            ).toLocaleDateString('es-AR')}`,
             left + 4,
             y,
           );
@@ -494,6 +526,62 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
                 <div className="text-xs text-slate-500 mt-2">
                   Forma de pago: {paymentLabel(sale.paymentMethod)}
                 </div>
+
+                {sale.payments?.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {sale.payments.map((payment, index) => (
+                      <div
+                        key={`${payment.method}-${index}`}
+                        className="flex justify-between gap-3 text-xs text-slate-600"
+                      >
+                        <span>
+                          {paymentLabel(payment.method)}
+                          {payment.receiptNumber
+                            ? ` · Comp. ${payment.receiptNumber}`
+                            : ''}
+                        </span>
+
+                        <span className="font-semibold">
+                          ${money(payment.amount)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {sale.receivable && (
+                  <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                    <div className="text-xs font-bold text-amber-900">
+                      Cuenta corriente · {sale.receivable.customerName}
+                    </div>
+
+                    <div className="text-xs text-amber-800 mt-1">
+                      Pendiente financiado: ${money(
+                        sale.receivable.financedAmount,
+                      )} en {sale.receivable.installments.length} cuota(s).
+                    </div>
+
+                    <div className="mt-2 space-y-1">
+                      {sale.receivable.installments.map((installment) => (
+                        <div
+                          key={installment.id}
+                          className="flex justify-between gap-3 text-[11px] text-amber-800"
+                        >
+                          <span>
+                            Cuota {installment.number} · vence{' '}
+                            {new Date(
+                              installment.dueDate,
+                            ).toLocaleDateString('es-AR')}
+                          </span>
+
+                          <span className="font-bold">
+                            ${money(installment.amount)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
