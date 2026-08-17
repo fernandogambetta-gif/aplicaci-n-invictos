@@ -736,15 +736,15 @@ const UserManagement: React.FC<UserManagementProps> = ({
         <div>
           <div className="font-semibold">Los PIN existentes no se muestran.</div>
           <div className="text-amber-700 mt-0.5">
-            Para cambiar un PIN, editá el usuario y escribí uno nuevo de 4 dígitos. Si dejás el campo vacío, conserva el actual.
+            Para cambiar o blanquear un PIN, usá el botón de la llave correspondiente al usuario.
           </div>
         </div>
       </div>
 
       {pinResetUser && (
-        <div className="fixed inset-0 z-[10020] bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-            <div className="px-6 py-4 bg-violet-50 border-b border-violet-200 flex items-start justify-between gap-4">
+        <div className="fixed inset-0 z-[10020] bg-black/60 sm:flex sm:items-center sm:justify-center sm:p-4">
+          <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-lg sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="shrink-0 px-4 sm:px-6 py-4 bg-violet-50 border-b border-violet-200 flex items-start justify-between gap-4">
               <div>
                 <div className="text-xs uppercase tracking-wide font-bold text-violet-600">
                   Administración de usuarios
@@ -766,7 +766,7 @@ const UserManagement: React.FC<UserManagementProps> = ({
               </button>
             </div>
 
-            <div className="p-6 space-y-5">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-5">
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
                 <div className="text-xs text-slate-500">
                   Usuario al que se blanqueará la contraseña
@@ -877,6 +877,15 @@ const UserManagement: React.FC<UserManagementProps> = ({
                 </div>
               )}
 
+            </div>
+
+            <div
+              className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4"
+              style={{
+                paddingBottom:
+                  'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+              }}
+            >
               <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
@@ -1088,9 +1097,9 @@ const UserManagement: React.FC<UserManagementProps> = ({
       )}
 
       {isModalOpen && (
-        <div className="fixed inset-0 z-[9999] bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-            <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+        <div className="fixed inset-0 z-[9999] bg-black/50 sm:flex sm:items-center sm:justify-center sm:p-4">
+          <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-lg sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+            <div className="shrink-0 px-4 sm:px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <h3 className="text-lg font-bold text-slate-900">
                   {editingUser ? 'Editar Usuario' : 'Nuevo Usuario'}
@@ -1109,7 +1118,7 @@ const UserManagement: React.FC<UserManagementProps> = ({
               </button>
             </div>
 
-            <div className="p-6 space-y-4">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-4">
               {error && (
                 <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm flex gap-2">
                   <AlertTriangle size={17} className="shrink-0 mt-0.5" />
@@ -1215,25 +1224,37 @@ const UserManagement: React.FC<UserManagementProps> = ({
               )}
             </div>
 
-            <div className="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={closeModal}
-                disabled={isSaving}
-                className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
-              >
-                Cancelar
-              </button>
+            <div
+              className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 bg-slate-50 border-t border-slate-200"
+              style={{
+                paddingBottom:
+                  'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+              }}
+            >
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  disabled={isSaving}
+                  className="py-3 rounded-xl bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 font-semibold disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
 
-              <button
-                type="button"
-                onClick={() => void handleSave()}
-                disabled={isSaving}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold flex items-center gap-2 disabled:opacity-60"
-              >
-                {isSaving ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle2 size={18} />}
-                {editingUser ? 'Guardar Cambios' : 'Crear Usuario'}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSave()}
+                  disabled={isSaving}
+                  className="py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  {isSaving ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <CheckCircle2 size={18} />
+                  )}
+                  {editingUser ? 'Guardar Cambios' : 'Crear Usuario'}
+                </button>
+              </div>
             </div>
           </div>
         </div>
