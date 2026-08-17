@@ -10,6 +10,7 @@ import {
   PaymentMethod,
   SalePaymentMethod,
   PaymentAllocation,
+  ReceivableInstallment,
 } from '../types';
 import {
   ShoppingCart,
@@ -34,6 +35,8 @@ import {
   PackagePlus,
   Shirt,
   Megaphone,
+  CalendarClock,
+  UserRound,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
@@ -47,6 +50,11 @@ interface POSProps {
 }
 
 type MixedPaymentState = Record<PaymentMethod, string>;
+
+interface AccountInstallmentDraft {
+  dueDate: string;
+  amount: string;
+}
 
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 
@@ -63,11 +71,31 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
   const [paymentMethod, setPaymentMethod] =
     useState<SalePaymentMethod>('cash');
-  const [mixedPayments, setMixedPayments] = useState<MixedPaymentState>({
-    cash: '',
+
+  const [mixedPayments, setMixedPayments] =
+    useState<MixedPaymentState>({
+      cash: '',
+      debit: '',
+      card: '',
+      transfer: '',
+      account: '',
+    });
+
+  // N.º de comprobante opcional para débito / tarjeta.
+  const [paymentReferences, setPaymentReferences] = useState({
+    debit: '',
     card: '',
-    transfer: '',
   });
+
+  // Cuenta corriente.
+  const [accountCustomerName, setAccountCustomerName] = useState('');
+  const [accountCustomerPhone, setAccountCustomerPhone] = useState('');
+  const [accountCustomerEmail, setAccountCustomerEmail] = useState('');
+  const [accountInstallmentCount, setAccountInstallmentCount] = useState(1);
+  const [accountFirstDueDate, setAccountFirstDueDate] = useState('');
+  const [accountReminderDays, setAccountReminderDays] = useState(0);
+  const [accountInstallments, setAccountInstallments] =
+    useState<AccountInstallmentDraft[]>([]);
 
   const [successMsg, setSuccessMsg] = useState('');
   const [checkoutError, setCheckoutError] = useState('');
@@ -105,6 +133,47 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       minimumFractionDigits: 0,
       maximumFractionDigits: 2,
     });
+
+  const dateToInput = (date: Date): string =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
+      2,
+      '0',
+    )}-${String(date.getDate()).padStart(2, '0')}`;
+
+  const parseLocalDate = (value: string): Date => {
+    const [year, month, day] = value.split('-').map(Number);
+    const result = new Date(year, month - 1, day, 12, 0, 0, 0);
+    return result;
+  };
+
+  const addMonthsClamped = (
+    value: string,
+    monthsToAdd: number,
+  ): string => {
+    const original = parseLocalDate(value);
+    const originalDay = original.getDate();
+
+    const targetYear = original.getFullYear();
+    const targetMonth = original.getMonth() + monthsToAdd;
+
+    const lastDay = new Date(
+      targetYear,
+      targetMonth + 1,
+      0,
+    ).getDate();
+
+    const result = new Date(
+      targetYear,
+      targetMonth,
+      Math.min(originalDay, lastDay),
+      12,
+      0,
+      0,
+      0,
+    );
+
+    return dateToInput(result);
+  };
 
   const calculateLine = (
     quantity: number,
@@ -465,7 +534,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     0,
   );
 
-  const parsedMixedPayments: PaymentAllocation[] = [
+  const parsedMixedPayments: PaymentAllocation[] = ([
     {
       method: 'cash',
       amount: Math.max(
@@ -474,11 +543,22 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       ),
     },
     {
+      method: 'debit',
+      amount: Math.max(
+        0,
+        toNumber(mixedPayments.debit, 0),
+      ),
+      receiptNumber:
+        paymentReferences.debit.trim() || undefined,
+    },
+    {
       method: 'card',
       amount: Math.max(
         0,
         toNumber(mixedPayments.card, 0),
       ),
+      receiptNumber:
+        paymentReferences.card.trim() || undefined,
     },
     {
       method: 'transfer',
@@ -487,7 +567,16 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         toNumber(mixedPayments.transfer, 0),
       ),
     },
-  ].filter((payment) => payment.amount > 0);
+    {
+      method: 'account',
+      amount: Math.max(
+        0,
+        toNumber(mixedPayments.account, 0),
+      ),
+    },
+  ] as PaymentAllocation[]).filter(
+    (payment) => payment.amount > 0,
+  );
 
   const mixedAssigned = parsedMixedPayments.reduce(
     (acc, payment) => acc + payment.amount,
@@ -500,6 +589,79 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const mixedPaymentValid =
     Math.abs(paymentDifference) < 0.01;
 
+  const accountAmount =
+    paymentMethod === 'account'
+      ? finalTotal
+      : paymentMethod === 'mixed'
+        ? Math.max(
+            0,
+            toNumber(mixedPayments.account, 0),
+          )
+        : 0;
+
+  // Genera cuotas mensuales iguales. Luego cada vencimiento e importe
+  // se puede editar manualmente.
+  useEffect(() => {
+    if (
+      accountAmount <= 0 ||
+      !accountFirstDueDate ||
+      accountInstallmentCount < 1
+    ) {
+      setAccountInstallments([]);
+      return;
+    }
+
+    const count = Math.max(
+      1,
+      Math.min(60, Math.floor(accountInstallmentCount)),
+    );
+
+    const roundedTotal = Math.round(accountAmount * 100);
+    const baseCents = Math.floor(roundedTotal / count);
+    const remainder = roundedTotal - baseCents * count;
+
+    const drafts: AccountInstallmentDraft[] = Array.from(
+      { length: count },
+      (_, index) => {
+        const cents =
+          baseCents + (index === count - 1 ? remainder : 0);
+
+        return {
+          dueDate: addMonthsClamped(
+            accountFirstDueDate,
+            index,
+          ),
+          amount: (cents / 100).toFixed(2),
+        };
+      },
+    );
+
+    setAccountInstallments(drafts);
+  }, [
+    accountAmount,
+    accountFirstDueDate,
+    accountInstallmentCount,
+  ]);
+
+  const accountInstallmentsTotal =
+    accountInstallments.reduce(
+      (acc, installment) =>
+        acc + Math.max(0, toNumber(installment.amount, 0)),
+      0,
+    );
+
+  const accountInstallmentsValid =
+    accountAmount <= 0 ||
+    (accountCustomerName.trim().length > 0 &&
+      accountInstallments.length ===
+        Math.max(1, Math.floor(accountInstallmentCount)) &&
+      accountInstallments.every(
+        (installment) =>
+          Boolean(installment.dueDate) &&
+          toNumber(installment.amount, 0) > 0,
+      ) &&
+      Math.abs(accountInstallmentsTotal - accountAmount) < 0.01);
+
   const setPaymentAndReset = (
     method: SalePaymentMethod,
   ) => {
@@ -509,8 +671,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     if (method !== 'mixed') {
       setMixedPayments({
         cash: '',
+        debit: '',
         card: '',
         transfer: '',
+        account: '',
       });
     }
   };
@@ -519,7 +683,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     method: PaymentMethod,
   ) => {
     const others = (
-      ['cash', 'card', 'transfer'] as PaymentMethod[]
+      ['cash', 'debit', 'card', 'transfer', 'account'] as PaymentMethod[]
     )
       .filter((m) => m !== method)
       .reduce(
@@ -556,6 +720,12 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         {
           method: paymentMethod,
           amount: finalTotal,
+          receiptNumber:
+            paymentMethod === 'debit'
+              ? paymentReferences.debit.trim() || undefined
+              : paymentMethod === 'card'
+                ? paymentReferences.card.trim() || undefined
+                : undefined,
         },
       ];
     };
@@ -586,6 +756,31 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       return;
     }
 
+    if (accountAmount > 0) {
+      if (!accountCustomerName.trim()) {
+        setCheckoutError(
+          'Para una cuenta corriente ingresá el nombre del cliente.',
+        );
+        return;
+      }
+
+      if (!accountFirstDueDate) {
+        setCheckoutError(
+          'Seleccioná la fecha de vencimiento de la primera cuota.',
+        );
+        return;
+      }
+
+      if (!accountInstallmentsValid) {
+        setCheckoutError(
+          `Las cuotas deben sumar exactamente $${formatMoney(
+            accountAmount,
+          )} y tener fecha e importe válidos.`,
+        );
+        return;
+      }
+    }
+
     setIsProcessing(true);
 
     try {
@@ -608,8 +803,38 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         }),
       );
 
+      const saleId = Date.now().toString();
+
+      const receivable =
+        accountAmount > 0
+          ? {
+              customerName: accountCustomerName.trim(),
+              customerPhone:
+                accountCustomerPhone.trim() || undefined,
+              customerEmail:
+                accountCustomerEmail.trim() || undefined,
+              financedAmount: accountAmount,
+              reminderDaysAfterDue: Math.max(
+                0,
+                Math.floor(toNumber(accountReminderDays, 0)),
+              ),
+              installments: accountInstallments.map(
+                (installment, index): ReceivableInstallment => ({
+                  id: `${saleId}-inst-${index + 1}`,
+                  number: index + 1,
+                  dueDate: parseLocalDate(
+                    installment.dueDate,
+                  ).getTime(),
+                  amount: toNumber(installment.amount, 0),
+                  paidAmount: 0,
+                  payments: [],
+                }),
+              ),
+            }
+          : undefined;
+
       const sale: Sale = {
-        id: Date.now().toString(),
+        id: saleId,
         items: itemsWithCommission,
         subtotal: grossSubtotal,
         discount: totalDiscount,
@@ -617,6 +842,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         timestamp: Date.now(),
         paymentMethod,
         payments: getPaymentsForSale(),
+        receivable,
         userId: currentUser.id,
         userName: currentUser.name,
       };
@@ -631,9 +857,22 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       setPaymentMethod('cash');
       setMixedPayments({
         cash: '',
+        debit: '',
         card: '',
         transfer: '',
+        account: '',
       });
+      setPaymentReferences({
+        debit: '',
+        card: '',
+      });
+      setAccountCustomerName('');
+      setAccountCustomerPhone('');
+      setAccountCustomerEmail('');
+      setAccountInstallmentCount(1);
+      setAccountFirstDueDate('');
+      setAccountReminderDays(0);
+      setAccountInstallments([]);
 
       await onSaleComplete();
 
@@ -1430,12 +1669,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             </p>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
               type="button"
-              onClick={() =>
-                setPaymentAndReset('cash')
-              }
+              onClick={() => setPaymentAndReset('cash')}
               className={paymentButtonClass(
                 paymentMethod === 'cash',
               )}
@@ -1446,9 +1683,18 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
             <button
               type="button"
-              onClick={() =>
-                setPaymentAndReset('card')
-              }
+              onClick={() => setPaymentAndReset('debit')}
+              className={paymentButtonClass(
+                paymentMethod === 'debit',
+              )}
+            >
+              <CreditCard size={15} />
+              Débito
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPaymentAndReset('card')}
               className={paymentButtonClass(
                 paymentMethod === 'card',
               )}
@@ -1460,13 +1706,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             <button
               type="button"
               onClick={() =>
-                setPaymentAndReset(
-                  'transfer',
-                )
+                setPaymentAndReset('transfer')
               }
               className={paymentButtonClass(
-                paymentMethod ===
-                  'transfer',
+                paymentMethod === 'transfer',
               )}
             >
               <Landmark size={15} />
@@ -1476,8 +1719,19 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             <button
               type="button"
               onClick={() =>
-                setPaymentAndReset('mixed')
+                setPaymentAndReset('account')
               }
+              className={paymentButtonClass(
+                paymentMethod === 'account',
+              )}
+            >
+              <CalendarClock size={15} />
+              Cta. corriente
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setPaymentAndReset('mixed')}
               className={paymentButtonClass(
                 paymentMethod === 'mixed',
               )}
@@ -1487,37 +1741,52 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             </button>
           </div>
 
+          {(paymentMethod === 'debit' ||
+            paymentMethod === 'card') && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+              <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                N.º de comprobante (opcional)
+              </label>
+
+              <input
+                type="text"
+                value={
+                  paymentMethod === 'debit'
+                    ? paymentReferences.debit
+                    : paymentReferences.card
+                }
+                onChange={(e) =>
+                  setPaymentReferences((prev) => ({
+                    ...prev,
+                    [paymentMethod]: e.target.value,
+                  }))
+                }
+                placeholder="Ej.: 001245"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
+              />
+            </div>
+          )}
+
           {paymentMethod === 'mixed' && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-3">
               <div className="text-sm font-semibold text-slate-700">
-                Distribuir $
-                {formatMoney(finalTotal)}
+                Distribuir ${formatMoney(finalTotal)}
               </div>
 
               {(
                 [
-                  [
-                    'cash',
-                    'Efectivo',
-                    Banknote,
-                  ],
-                  [
-                    'card',
-                    'Tarjeta',
-                    CreditCard,
-                  ],
-                  [
-                    'transfer',
-                    'Transferencia',
-                    Landmark,
-                  ],
+                  ['cash', 'Efectivo', Banknote],
+                  ['debit', 'Débito', CreditCard],
+                  ['card', 'Tarjeta', CreditCard],
+                  ['transfer', 'Transferencia', Landmark],
+                  ['account', 'Cuenta corriente', CalendarClock],
                 ] as const
-              ).map(
-                ([method, label, Icon]) => (
-                  <div
-                    key={method}
-                    className="grid grid-cols-[115px_1fr_auto] gap-2 items-center"
-                  >
+              ).map(([method, label, Icon]) => (
+                <div
+                  key={method}
+                  className="border-b border-slate-200 last:border-b-0 pb-3 last:pb-0 space-y-2"
+                >
+                  <div className="grid grid-cols-[120px_1fr_auto] gap-2 items-center">
                     <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
                       <Icon size={15} />
                       {label}
@@ -1528,23 +1797,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                       min="0"
                       step="0.01"
                       placeholder="$ 0"
-                      value={
-                        mixedPayments[
-                          method
-                        ]
-                      }
+                      value={mixedPayments[method]}
                       onChange={(e) => {
-                        setCheckoutError(
-                          '',
-                        );
-                        setMixedPayments(
-                          (prev) => ({
-                            ...prev,
-                            [method]:
-                              e.target
-                                .value,
-                          }),
-                        );
+                        setCheckoutError('');
+                        setMixedPayments((prev) => ({
+                          ...prev,
+                          [method]: e.target.value,
+                        }));
                       }}
                       className="min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-right focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
                     />
@@ -1552,17 +1811,38 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                     <button
                       type="button"
                       onClick={() =>
-                        completeRemainingWith(
-                          method,
-                        )
+                        completeRemainingWith(method)
                       }
                       className="text-[11px] font-semibold px-2 py-2 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 text-slate-600"
                     >
                       Resto
                     </button>
                   </div>
-                ),
-              )}
+
+                  {(method === 'debit' ||
+                    method === 'card') &&
+                    toNumber(
+                      mixedPayments[method],
+                      0,
+                    ) > 0 && (
+                      <div className="grid grid-cols-[120px_1fr] gap-2">
+                        <div />
+                        <input
+                          type="text"
+                          value={paymentReferences[method]}
+                          onChange={(e) =>
+                            setPaymentReferences((prev) => ({
+                              ...prev,
+                              [method]: e.target.value,
+                            }))
+                          }
+                          placeholder={`N.º comprobante ${label.toLowerCase()} (opcional)`}
+                          className="min-w-0 border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+                        />
+                      </div>
+                    )}
+                </div>
+              ))}
 
               <div className="pt-2 border-t border-slate-200">
                 <div
@@ -1577,8 +1857,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                   <span>
                     {mixedPaymentValid
                       ? 'Pago completo'
-                      : paymentDifference >
-                          0
+                      : paymentDifference > 0
                         ? 'Falta'
                         : 'Excede'}
                   </span>
@@ -1589,13 +1868,232 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                           mixedAssigned,
                         )}`
                       : `$${formatMoney(
-                          Math.abs(
-                            paymentDifference,
-                          ),
+                          Math.abs(paymentDifference),
                         )}`}
                   </span>
                 </div>
               </div>
+            </div>
+          )}
+
+          {accountAmount > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-4">
+              <div>
+                <div className="font-bold text-amber-900 flex items-center gap-2">
+                  <CalendarClock size={18} />
+                  Cuenta corriente · ${formatMoney(accountAmount)}
+                </div>
+
+                <p className="text-xs text-amber-700 mt-1">
+                  Esta parte de la venta queda pendiente de cobro.
+                  INVICTOS avisará cuando corresponda cobrar una cuota.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                    Cliente *
+                  </label>
+
+                  <div className="relative">
+                    <UserRound
+                      size={17}
+                      className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                    <input
+                      type="text"
+                      value={accountCustomerName}
+                      onChange={(e) =>
+                        setAccountCustomerName(
+                          e.target.value,
+                        )
+                      }
+                      placeholder="Nombre y apellido / Razón social"
+                      className="w-full border border-slate-300 rounded-lg pl-9 pr-3 py-2 bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                    Cuotas
+                  </label>
+
+                  <input
+                    type="number"
+                    min="1"
+                    max="60"
+                    value={accountInstallmentCount}
+                    onChange={(e) =>
+                      setAccountInstallmentCount(
+                        Math.max(
+                          1,
+                          Math.min(
+                            60,
+                            parseInt(e.target.value, 10) || 1,
+                          ),
+                        ),
+                      )
+                    }
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                    Teléfono
+                  </label>
+                  <input
+                    type="tel"
+                    value={accountCustomerPhone}
+                    onChange={(e) =>
+                      setAccountCustomerPhone(
+                        e.target.value,
+                      )
+                    }
+                    placeholder="Opcional"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    value={accountCustomerEmail}
+                    onChange={(e) =>
+                      setAccountCustomerEmail(
+                        e.target.value,
+                      )
+                    }
+                    placeholder="Opcional"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                    1.er vencimiento *
+                  </label>
+                  <input
+                    type="date"
+                    value={accountFirstDueDate}
+                    onChange={(e) =>
+                      setAccountFirstDueDate(
+                        e.target.value,
+                      )
+                    }
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-600 uppercase mb-1">
+                  Avisar después del vencimiento
+                </label>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    max="365"
+                    value={accountReminderDays}
+                    onChange={(e) =>
+                      setAccountReminderDays(
+                        Math.max(
+                          0,
+                          parseInt(e.target.value, 10) || 0,
+                        ),
+                      )
+                    }
+                    className="w-24 border border-slate-300 rounded-lg px-3 py-2 bg-white"
+                  />
+                  <span className="text-sm text-slate-600">
+                    día(s) después del vencimiento. 0 = avisar desde ese día.
+                  </span>
+                </div>
+              </div>
+
+              {accountInstallments.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-xs font-bold text-slate-600 uppercase">
+                    Plan de cuotas
+                  </div>
+
+                  {accountInstallments.map(
+                    (installment, index) => (
+                      <div
+                        key={index}
+                        className="grid grid-cols-[52px_1fr_1fr] gap-2 items-center"
+                      >
+                        <div className="text-xs font-bold text-slate-500">
+                          #{index + 1}
+                        </div>
+
+                        <input
+                          type="date"
+                          value={installment.dueDate}
+                          onChange={(e) =>
+                            setAccountInstallments(
+                              (prev) =>
+                                prev.map((item, i) =>
+                                  i === index
+                                    ? {
+                                        ...item,
+                                        dueDate:
+                                          e.target
+                                            .value,
+                                      }
+                                    : item,
+                                ),
+                            )
+                          }
+                          className="min-w-0 border border-slate-300 rounded-lg px-2 py-2 bg-white text-sm"
+                        />
+
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={installment.amount}
+                          onChange={(e) =>
+                            setAccountInstallments(
+                              (prev) =>
+                                prev.map((item, i) =>
+                                  i === index
+                                    ? {
+                                        ...item,
+                                        amount:
+                                          e.target
+                                            .value,
+                                      }
+                                    : item,
+                                ),
+                            )
+                          }
+                          className="min-w-0 border border-slate-300 rounded-lg px-2 py-2 bg-white text-sm text-right"
+                        />
+                      </div>
+                    ),
+                  )}
+
+                  <div
+                    className={`text-sm font-bold text-right ${
+                      accountInstallmentsValid
+                        ? 'text-emerald-700'
+                        : 'text-red-600'
+                    }`}
+                  >
+                    Cuotas: ${formatMoney(accountInstallmentsTotal)}
+                    {' / '}
+                    ${formatMoney(accountAmount)}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -1617,14 +2115,18 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               finalTotal <= 0 ||
               isProcessing ||
               (paymentMethod === 'mixed' &&
-                !mixedPaymentValid)
+                !mixedPaymentValid) ||
+              (accountAmount > 0 &&
+                !accountInstallmentsValid)
             }
             className={`w-full py-4 rounded-xl font-bold text-lg shadow-md transition-all flex items-center justify-center gap-2 ${
               cart.length > 0 &&
               finalTotal > 0 &&
               !isProcessing &&
               (paymentMethod !== 'mixed' ||
-                mixedPaymentValid)
+                mixedPaymentValid) &&
+              (accountAmount <= 0 ||
+                accountInstallmentsValid)
                 ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200'
                 : 'bg-slate-300 text-slate-500 cursor-not-allowed'
             }`}
