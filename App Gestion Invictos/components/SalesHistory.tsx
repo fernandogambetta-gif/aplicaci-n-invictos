@@ -9,6 +9,7 @@ import {
   SalePaymentMethod,
 } from '../types';
 import { StorageService } from '../services/storageService';
+import AccountsReceivablePanel from './AccountsReceivablePanel';
 import {
   Calendar,
   DollarSign,
@@ -26,10 +27,11 @@ import {
 interface SalesHistoryProps {
   sales: Sale[];
   currentUser: User;
+  onUpdate?: () => void | Promise<void>;
 }
 
 type PeriodType = 'day' | 'week' | 'month' | 'year' | 'custom';
-type HistoryTab = 'sales' | 'sellers' | 'expenses';
+type HistoryTab = 'sales' | 'sellers' | 'expenses' | 'receivables';
 
 interface Range {
   start: number;
@@ -118,19 +120,39 @@ const formatDateTime = (timestamp: number): string =>
 
 const paymentLabel = (method: SalePaymentMethod): string => {
   if (method === 'cash') return 'Efectivo';
+  if (method === 'debit') return 'Débito';
   if (method === 'card') return 'Tarjeta';
   if (method === 'transfer') return 'Transferencia';
+  if (method === 'account') return 'Cuenta corriente';
   return 'Mixto';
 };
 
 const SalesHistory: React.FC<SalesHistoryProps> = ({
   sales,
   currentUser,
+  onUpdate,
 }) => {
   const isAdmin = currentUser.role === 'admin';
   const today = new Date();
 
-  const [tab, setTab] = useState<HistoryTab>('sales');
+  const [tab, setTab] = useState<HistoryTab>(() => {
+    try {
+      const requested = window.localStorage.getItem(
+        'invictos_history_requested_tab',
+      );
+
+      if (requested === 'receivables') {
+        window.localStorage.removeItem(
+          'invictos_history_requested_tab',
+        );
+        return 'receivables';
+      }
+    } catch {
+      // Sin acción.
+    }
+
+    return 'sales';
+  });
 
   const [periodType, setPeriodType] =
     useState<PeriodType>('month');
@@ -211,7 +233,10 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
   }, [isAdmin]);
 
   useEffect(() => {
-    if (!isAdmin && tab !== 'sales') {
+    if (
+      !isAdmin &&
+      (tab === 'sellers' || tab === 'expenses')
+    ) {
       setTab('sales');
     }
   }, [isAdmin, tab]);
@@ -1203,11 +1228,17 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
               <option value="cash">
                 Efectivo
               </option>
+              <option value="debit">
+                Débito
+              </option>
               <option value="card">
                 Tarjeta
               </option>
               <option value="transfer">
                 Transferencia
+              </option>
+              <option value="account">
+                Cuenta corriente
               </option>
               <option value="mixed">
                 Mixto
@@ -1249,7 +1280,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
         />
 
         <SummaryCard
-          label="Ingresos"
+          label="Ventas netas"
           value={`$${money(
             summary.revenue,
           )}`}
@@ -1277,7 +1308,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
               value={`$${money(
                 summary.grossMargin,
               )}`}
-              sub="Ingresos - mercadería"
+              sub="Ventas - mercadería"
             />
           </>
         )}
@@ -1377,6 +1408,12 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
           active={tab === 'sales'}
           onClick={() => setTab('sales')}
           label="Ventas"
+        />
+
+        <TabButton
+          active={tab === 'receivables'}
+          onClick={() => setTab('receivables')}
+          label="Cuentas corrientes"
         />
 
         {isAdmin && (
@@ -1655,6 +1692,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
             </table>
           </div>
         </div>
+      )}
+
+      {tab === 'receivables' && (
+        <AccountsReceivablePanel
+          sales={sales}
+          currentUser={currentUser}
+          onUpdate={onUpdate}
+        />
       )}
 
       {isAdmin &&
