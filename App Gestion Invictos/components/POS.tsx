@@ -63,6 +63,43 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
 
+  // Imputación administrativa de una venta.
+  const [saleUsers, setSaleUsers] = useState<User[]>([currentUser]);
+  const [saleUserId, setSaleUserId] = useState(currentUser.id);
+
+  const toDateTimeLocalValue = (date: Date): string => {
+    const pad = (value: number) => String(value).padStart(2, '0');
+
+    return `${date.getFullYear()}-${pad(
+      date.getMonth() + 1,
+    )}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(
+      date.getMinutes(),
+    )}`;
+  };
+
+  const parseDateTimeLocal = (value: string): number => {
+    const [datePart, timePart] = value.split('T');
+
+    if (!datePart || !timePart) return NaN;
+
+    const [year, month, day] = datePart.split('-').map(Number);
+    const [hour, minute] = timePart.split(':').map(Number);
+
+    return new Date(
+      year,
+      month - 1,
+      day,
+      hour,
+      minute,
+      0,
+      0,
+    ).getTime();
+  };
+
+  const [saleDateTime, setSaleDateTime] = useState(
+    toDateTimeLocalValue(new Date()),
+  );
+
   // Selector de productos en formato lista
   const [productPickerOpen, setProductPickerOpen] = useState(false);
   const [productSearch, setProductSearch] = useState('');
@@ -233,6 +270,56 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       subtotal: totals.subtotal,
     };
   };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadSaleUsers = async () => {
+      if (currentUser.role !== 'admin') {
+        setSaleUsers([currentUser]);
+        setSaleUserId(currentUser.id);
+        return;
+      }
+
+      try {
+        const users = await StorageService.getUsers();
+
+        if (cancelled) return;
+
+        const sorted = [...users].sort((a, b) => {
+          if (a.role !== b.role) {
+            return a.role === 'seller' ? -1 : 1;
+          }
+
+          return a.name.localeCompare(b.name, 'es');
+        });
+
+        const finalUsers = sorted.length ? sorted : [currentUser];
+
+        setSaleUsers(finalUsers);
+
+        if (!finalUsers.some((user) => user.id === saleUserId)) {
+          setSaleUserId(currentUser.id);
+        }
+      } catch (error) {
+        console.error('Error cargando usuarios para imputar venta:', error);
+
+        if (!cancelled) {
+          setSaleUsers([currentUser]);
+          setSaleUserId(currentUser.id);
+        }
+      }
+    };
+
+    void loadSaleUsers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser.id, currentUser.role]);
+
+  const effectiveSaleUser =
+    saleUsers.find((user) => user.id === saleUserId) || currentUser;
 
   useEffect(() => {
     const load = async () => {
@@ -756,6 +843,32 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       return;
     }
 
+    const selectedSaleTimestamp =
+      currentUser.role === 'admin'
+        ? parseDateTimeLocal(saleDateTime)
+        : Date.now();
+
+    if (
+      currentUser.role === 'admin' &&
+      !saleUsers.some((user) => user.id === saleUserId)
+    ) {
+      setCheckoutError('Seleccioná el usuario que realizó la venta.');
+      return;
+    }
+
+    if (!Number.isFinite(selectedSaleTimestamp) || selectedSaleTimestamp <= 0) {
+      setCheckoutError('Ingresá una fecha y hora válida para la venta.');
+      return;
+    }
+
+    if (
+      currentUser.role === 'admin' &&
+      selectedSaleTimestamp > Date.now() + 60_000
+    ) {
+      setCheckoutError('La fecha de la venta no puede estar en el futuro.');
+      return;
+    }
+
     if (accountAmount > 0) {
       if (!accountCustomerName.trim()) {
         setCheckoutError(
@@ -790,7 +903,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       );
 
       const userRate = toRate(
-        currentUser?.commissionPercentage,
+        effectiveSaleUser?.commissionPercentage,
         configRate,
       );
 
@@ -833,18 +946,30 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             }
           : undefined;
 
+      const recordedAt = Date.now();
+
       const sale: Sale = {
         id: saleId,
         items: itemsWithCommission,
         subtotal: grossSubtotal,
         discount: totalDiscount,
         total: finalTotal,
-        timestamp: Date.now(),
+
+        // Fecha/hora real de la venta.
+        timestamp: selectedSaleTimestamp,
+
         paymentMethod,
         payments: getPaymentsForSale(),
         receivable,
-        userId: currentUser.id,
-        userName: currentUser.name,
+
+        // Usuario que realizó la venta.
+        userId: effectiveSaleUser.id,
+        userName: effectiveSaleUser.name,
+
+        // Usuario que cargó la operación en INVICTOS.
+        recordedAt,
+        recordedByUserId: currentUser.id,
+        recordedByUserName: currentUser.name,
       };
 
       await StorageService.addSale(sale);
@@ -873,6 +998,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       setAccountFirstDueDate('');
       setAccountReminderDays(0);
       setAccountInstallments([]);
+
+      // Evita heredar una imputación anterior por error.
+      setSaleUserId(currentUser.id);
+      setSaleDateTime(toDateTimeLocalValue(new Date()));
 
       await onSaleComplete();
 
@@ -1010,6 +1139,83 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         </div>
       </div>
 
+      {currentUser.role === 'admin' && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
+          <div className="flex items-start gap-2 mb-3">
+            <UserRound
+              size={19}
+              className="text-indigo-600 shrink-0 mt-0.5"
+            />
+
+            <div>
+              <div className="font-bold text-indigo-900">
+                Datos reales de la venta
+              </div>
+
+              <div className="text-xs text-indigo-700 mt-0.5">
+                Para cargar una venta realizada por otro usuario o en una
+                fecha anterior.
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">
+                Usuario que realizó la venta
+              </label>
+
+              <select
+                value={saleUserId}
+                onChange={(e) => {
+                  setSaleUserId(e.target.value);
+                  setCheckoutError('');
+                }}
+                className="w-full border border-indigo-200 rounded-lg px-3 py-2.5 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                {saleUsers.map((user) => (
+                  <option key={user.id} value={user.id}>
+                    {user.name}
+                    {user.role === 'admin'
+                      ? ' · Administrador'
+                      : ' · Vendedor'}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">
+                Fecha y hora de la venta
+              </label>
+
+              <div className="relative">
+                <CalendarClock
+                  size={17}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-indigo-400 pointer-events-none"
+                />
+
+                <input
+                  type="datetime-local"
+                  value={saleDateTime}
+                  max={toDateTimeLocalValue(new Date())}
+                  onChange={(e) => {
+                    setSaleDateTime(e.target.value);
+                    setCheckoutError('');
+                  }}
+                  className="w-full border border-indigo-200 rounded-lg pl-9 pr-3 py-2.5 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-3 text-[11px] text-indigo-600">
+            La comisión se imputará a <b>{effectiveSaleUser.name}</b>.
+            La carga quedará registrada a nombre de <b>{currentUser.name}</b>.
+          </div>
+        </div>
+      )}
+
       {scanError && (
         <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
           <AlertTriangle
@@ -1037,7 +1243,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               Detalle de la venta
             </div>
             <div className="text-xs text-slate-500">
-              Vendedor: {currentUser.name}
+              Vendedor: {effectiveSaleUser.name}
+              {currentUser.role === 'admin' &&
+                effectiveSaleUser.id !== currentUser.id && (
+                  <span className="text-indigo-600">
+                    {' · '}Cargada por {currentUser.name}
+                  </span>
+                )}
             </div>
           </div>
 
