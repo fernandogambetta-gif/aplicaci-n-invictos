@@ -101,12 +101,53 @@ export interface Product {
 }
 
 export type ItemDiscountType = 'percent' | 'amount';
-export type PaymentMethod = 'cash' | 'card' | 'transfer';
+export type PaymentMethod = 'cash' | 'debit' | 'card' | 'transfer' | 'account';
 export type SalePaymentMethod = PaymentMethod | 'mixed';
 
 export interface PaymentAllocation {
   method: PaymentMethod;
   amount: number;
+
+  // Opcional para débito / tarjeta.
+  receiptNumber?: string;
+}
+
+export interface ReceivablePayment {
+  id: string;
+  amount: number;
+  timestamp: number;
+
+  // Una deuda no puede pagarse nuevamente con "cuenta corriente".
+  method: Exclude<PaymentMethod, 'account'>;
+
+  receiptNumber?: string;
+  notes?: string;
+
+  recordedByUserId: string;
+  recordedByUserName: string;
+}
+
+export interface ReceivableInstallment {
+  id: string;
+  number: number;
+  dueDate: number;
+  amount: number;
+  paidAmount: number;
+  payments?: ReceivablePayment[];
+}
+
+export interface Receivable {
+  customerName: string;
+  customerPhone?: string;
+  customerEmail?: string;
+
+  financedAmount: number;
+
+  // Cantidad de días posteriores al vencimiento para comenzar a alertar.
+  // 0 = avisar desde el día del vencimiento.
+  reminderDaysAfterDue: number;
+
+  installments: ReceivableInstallment[];
 }
 
 export interface SaleItem {
@@ -161,6 +202,9 @@ export interface Sale {
   // Para ventas mixtas se guarda 'mixed' y el detalle queda en payments.
   paymentMethod: SalePaymentMethod;
   payments?: PaymentAllocation[];
+
+  // Solo existe cuando parte o toda la venta queda a cuenta corriente.
+  receivable?: Receivable;
 
   userId: string;
   userName: string;
