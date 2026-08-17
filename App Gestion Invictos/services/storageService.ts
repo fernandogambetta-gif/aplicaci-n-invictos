@@ -7,6 +7,8 @@ import {
   ProviderItem,
   UserSecurity,
   Expense,
+  PaymentMethod,
+  ReceivablePayment,
 } from '../types';
 
 import {
@@ -374,9 +376,15 @@ export const StorageService = {
 
     const snap = await getDocs(collection(db, COLLECTIONS.EXPENSES));
 
-    return mapDocs<Expense>(snap).sort(
-      (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0),
-    );
+    return mapDocs<Expense>(snap).sort((a, b) => {
+      const periodCompare = String(b.periodMonth || '').localeCompare(
+        String(a.periodMonth || ''),
+      );
+
+      if (periodCompare !== 0) return periodCompare;
+
+      return Number(b.createdAt || 0) - Number(a.createdAt || 0);
+    });
   },
 
   saveExpense: async (expense: Expense): Promise<void> => {
@@ -706,6 +714,135 @@ export const StorageService = {
           stock: newStock,
           updatedAt: Date.now(),
         });
+      });
+    });
+  },
+
+  /**
+   * REGISTRAR COBRO DE CUENTA CORRIENTE
+   * - permite cobros parciales o totales;
+   * - conserva historial de cada pago;
+   * - la cuota nunca puede quedar sobrepagada.
+   */
+  recordReceivablePayment: async (
+    saleId: string,
+    installmentId: string,
+    payment: {
+      amount: number;
+      method: Exclude<PaymentMethod, 'account'>;
+      receiptNumber?: string;
+      notes?: string;
+      userId: string;
+      userName: string;
+      timestamp?: number;
+    },
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const amount = Number(payment.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('El importe cobrado debe ser mayor que cero.');
+    }
+
+    if (payment.method === ('account' as any)) {
+      throw new Error(
+        'Un cobro de cuenta corriente no puede registrarse nuevamente como cuenta corriente.',
+      );
+    }
+
+    await runTransaction(db, async (transaction) => {
+      const saleRef = doc(db, COLLECTIONS.SALES, saleId);
+      const saleSnap = await transaction.get(saleRef);
+
+      if (!saleSnap.exists()) {
+        throw new Error('La venta ya no existe.');
+      }
+
+      const saleData = saleSnap.data() as Sale;
+      const receivable = saleData.receivable;
+
+      if (!receivable) {
+        throw new Error('Esta venta no tiene cuenta corriente asociada.');
+      }
+
+      const installmentIndex = receivable.installments.findIndex(
+        (item) => item.id === installmentId,
+      );
+
+      if (installmentIndex < 0) {
+        throw new Error('No se encontró la cuota seleccionada.');
+      }
+
+      const installment = receivable.installments[installmentIndex];
+
+      const currentPaid = Math.max(
+        0,
+        Number(installment.paidAmount || 0),
+      );
+
+      const installmentAmount = Math.max(
+        0,
+        Number(installment.amount || 0),
+      );
+
+      const remaining = Math.max(
+        0,
+        installmentAmount - currentPaid,
+      );
+
+      if (remaining <= 0.009) {
+        throw new Error('Esta cuota ya está cancelada.');
+      }
+
+      if (amount - remaining > 0.009) {
+        throw new Error(
+          `El cobro supera el saldo de la cuota. Saldo: $${remaining.toLocaleString(
+            'es-AR',
+            {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            },
+          )}.`,
+        );
+      }
+
+      const now = payment.timestamp || Date.now();
+
+      const paymentRecord: ReceivablePayment = {
+        id: `pay-${now}-${Math.random().toString(36).slice(2, 8)}`,
+        amount,
+        timestamp: now,
+        method: payment.method,
+        receiptNumber: payment.receiptNumber?.trim() || undefined,
+        notes: payment.notes?.trim() || undefined,
+        recordedByUserId: payment.userId,
+        recordedByUserName: payment.userName,
+      };
+
+      const nextInstallments = receivable.installments.map(
+        (item, index) => {
+          if (index !== installmentIndex) return item;
+
+          return {
+            ...item,
+            paidAmount: Math.min(
+              Number(item.amount || 0),
+              Number(item.paidAmount || 0) + amount,
+            ),
+            payments: [
+              ...(item.payments || []),
+              paymentRecord,
+            ],
+          };
+        },
+      );
+
+      transaction.update(saleRef, {
+        receivable: cleanData({
+          ...receivable,
+          installments: nextInstallments,
+        }),
       });
     });
   },
