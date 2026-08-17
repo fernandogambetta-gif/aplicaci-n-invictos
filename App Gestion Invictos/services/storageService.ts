@@ -6,6 +6,7 @@ import {
   CategoryItem,
   ProviderItem,
   UserSecurity,
+  Expense,
 } from '../types';
 
 import {
@@ -53,6 +54,7 @@ const COLLECTIONS = {
   CONFIG: 'config',
   CATEGORIES: 'categories',
   PROVIDERS: 'providers',
+  EXPENSES: 'expenses',
 
   // Preparada para el próximo paso.
   INVENTORY_MOVEMENTS: 'inventoryMovements',
@@ -366,6 +368,54 @@ export const StorageService = {
     await deleteDoc(doc(db, COLLECTIONS.PROVIDERS, id));
   },
 
+  // ================= EXPENSES / GASTOS =================
+  getExpenses: async (): Promise<Expense[]> => {
+    if (!db) return [];
+
+    const snap = await getDocs(collection(db, COLLECTIONS.EXPENSES));
+
+    return mapDocs<Expense>(snap).sort(
+      (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0),
+    );
+  },
+
+  saveExpense: async (expense: Expense): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const amount = Number(expense.amount);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('El importe del gasto debe ser mayor que cero.');
+    }
+
+    if (!expense.description?.trim()) {
+      throw new Error('Ingresá una descripción para el gasto.');
+    }
+
+    if (!/^\d{4}-\d{2}$/.test(expense.periodMonth || '')) {
+      throw new Error('Seleccioná el mes al que corresponde el gasto.');
+    }
+
+    const now = Date.now();
+
+    await setDoc(
+      doc(db, COLLECTIONS.EXPENSES, expense.id),
+      cleanData({
+        ...expense,
+        description: expense.description.trim(),
+        amount,
+        createdAt: expense.createdAt || now,
+        updatedAt: now,
+      }),
+      { merge: true },
+    );
+  },
+
+  deleteExpense: async (expenseId: string): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await deleteDoc(doc(db, COLLECTIONS.EXPENSES, expenseId));
+  },
+
   // ================= PRODUCTS =================
   getProducts: async (): Promise<Product[]> => {
     if (!db) return [];
@@ -607,7 +657,7 @@ export const StorageService = {
         productSnapshots.push(await transaction.get(productRef));
       }
 
-      const stockUpdates = sale.items.map((item, index) => {
+      const enrichedItems = sale.items.map((item, index) => {
         const snap = productSnapshots[index];
 
         if (!snap.exists()) {
@@ -633,15 +683,25 @@ export const StorageService = {
         }
 
         return {
+          item: {
+            ...item,
+            costAtSale: Math.max(0, Number(productData.cost || 0)),
+          },
           ref: productRefs[index],
           newStock: currentStock - requestedQuantity,
         };
       });
 
       const saleRef = doc(db, COLLECTIONS.SALES, sale.id);
-      transaction.set(saleRef, cleanData(sale));
 
-      stockUpdates.forEach(({ ref, newStock }) => {
+      const saleToSave: Sale = {
+        ...sale,
+        items: enrichedItems.map((entry) => entry.item),
+      };
+
+      transaction.set(saleRef, cleanData(saleToSave));
+
+      enrichedItems.forEach(({ ref, newStock }) => {
         transaction.update(ref, {
           stock: newStock,
           updatedAt: Date.now(),
