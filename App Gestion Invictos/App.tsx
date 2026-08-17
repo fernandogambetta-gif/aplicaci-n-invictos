@@ -11,7 +11,7 @@ import Login from './components/Login';
 import ProfileModal from './components/ProfileModal';
 import { StorageService } from './services/storageService';
 import { Product, Sale, User } from './types';
-import { Menu, Loader2, Database, AlertTriangle, CheckCircle2 } from 'lucide-react';
+import { Menu, Loader2, Database, AlertTriangle, CheckCircle2, BellRing } from 'lucide-react';
 
 const SESSION_STORAGE_KEY = 'invictos_authenticated_session_v1';
 const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
@@ -297,6 +297,81 @@ const App: React.FC = () => {
     alert('PIN / contraseña actualizada correctamente.');
   };
 
+  // Avisos internos de cuenta corriente.
+  // Se calculan con los datos de ventas ya cargados y aparecen al usar INVICTOS.
+  const accountAlertSummary = (() => {
+    if (!currentUser) {
+      return {
+        count: 0,
+        amount: 0,
+      };
+    }
+
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    let count = 0;
+    let amount = 0;
+
+    sales.forEach((sale) => {
+      if (!sale.receivable) return;
+
+      if (
+        currentUser.role !== 'admin' &&
+        sale.userId !== currentUser.id
+      ) {
+        return;
+      }
+
+      const reminderDays = Math.max(
+        0,
+        Number(
+          sale.receivable.reminderDaysAfterDue || 0,
+        ),
+      );
+
+      sale.receivable.installments.forEach(
+        (installment) => {
+          const installmentAmount = Math.max(
+            0,
+            Number(installment.amount || 0),
+          );
+
+          const paidAmount = Math.max(
+            0,
+            Number(installment.paidAmount || 0),
+          );
+
+          const remaining = Math.max(
+            0,
+            installmentAmount - paidAmount,
+          );
+
+          if (remaining <= 0.009) return;
+
+          const dueDate = new Date(
+            Number(installment.dueDate || 0),
+          );
+          dueDate.setHours(0, 0, 0, 0);
+
+          const alertAt =
+            dueDate.getTime() +
+            reminderDays * dayMs;
+
+          if (now >= alertAt) {
+            count += 1;
+            amount += remaining;
+          }
+        },
+      );
+    });
+
+    return {
+      count,
+      amount,
+    };
+  })();
+
   // --- MISSING CONFIG SCREEN ---
   if (!isConfigured) {
     return (
@@ -448,7 +523,7 @@ const App: React.FC = () => {
         return <Inventory products={products} onUpdate={refreshData} />;
 
       case 'history':
-        return <SalesHistory sales={sales} currentUser={currentUser} />;
+        return <SalesHistory sales={sales} currentUser={currentUser} onUpdate={refreshData} />;
 
       case 'team':
         return <TeamCommissions sales={sales} currentUser={currentUser} onUpdate={refreshData} />;
@@ -512,6 +587,51 @@ const App: React.FC = () => {
               <Loader2 className="animate-spin" size={12} /> Sync...
             </div>
           )}
+
+          {accountAlertSummary.count > 0 && currentView !== 'history' && (
+            <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex gap-3">
+                <BellRing
+                  size={22}
+                  className="text-amber-600 shrink-0 mt-0.5"
+                />
+
+                <div>
+                  <div className="font-bold text-amber-900">
+                    Cuenta corriente: {accountAlertSummary.count} cuota(s) requieren cobro
+                  </div>
+
+                  <div className="text-sm text-amber-700 mt-1">
+                    Saldo que ya alcanzó la fecha de aviso: $
+                    {accountAlertSummary.amount.toLocaleString('es-AR', {
+                      minimumFractionDigits: 0,
+                      maximumFractionDigits: 2,
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    window.localStorage.setItem(
+                      'invictos_history_requested_tab',
+                      'receivables',
+                    );
+                  } catch {
+                    // Sin acción.
+                  }
+
+                  setCurrentView('history');
+                }}
+                className="shrink-0 px-4 py-2.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold"
+              >
+                Ver cuentas corrientes
+              </button>
+            </div>
+          )}
+
           {renderContent()}
         </main>
       </div>
