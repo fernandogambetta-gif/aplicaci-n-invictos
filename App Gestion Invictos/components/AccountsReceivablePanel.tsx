@@ -103,8 +103,10 @@ const AccountsReceivablePanel: React.FC<
     const now = Date.now();
     const result: ReceivableRow[] = [];
 
-    sales.forEach((sale) => {
-      if (!sale.receivable) return;
+    const safeSales = Array.isArray(sales) ? sales : [];
+
+    safeSales.forEach((sale) => {
+      if (!sale?.receivable) return;
 
       if (
         !isAdmin &&
@@ -120,8 +122,13 @@ const AccountsReceivablePanel: React.FC<
         ),
       );
 
-      sale.receivable.installments.forEach(
-        (installment) => {
+      const installments = Array.isArray(
+        sale.receivable.installments,
+      )
+        ? sale.receivable.installments
+        : [];
+
+      installments.forEach((installment) => {
           const amount = Math.max(
             0,
             Number(installment.amount || 0),
@@ -176,8 +183,7 @@ const AccountsReceivablePanel: React.FC<
             alertDue,
             paid,
           });
-        },
-      );
+        });
     });
 
     return result.sort(
