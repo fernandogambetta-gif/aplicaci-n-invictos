@@ -61,11 +61,16 @@ const sortSizes = (a: string, b: string): number => {
 
 const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
   open,
-  products,
+  products: incomingProducts,
   onClose,
   onSelectProduct,
   closeOnSelect = false,
 }) => {
+  // Este componente se monta aunque el modal esté cerrado.
+  // Nunca permitimos ejecutar forEach/find sobre undefined/null.
+  const products: Product[] = Array.isArray(incomingProducts)
+    ? incomingProducts
+    : [];
   const [search, setSearch] = useState('');
   const [selectedGroupKey, setSelectedGroupKey] = useState('');
   const [onlyWithStock, setOnlyWithStock] = useState(true);
@@ -83,7 +88,7 @@ const VariantLookupModal: React.FC<VariantLookupModalProps> = ({
   const groups = useMemo<ProductGroup[]>(() => {
     const map = new Map<string, ProductGroup>();
 
-    products.forEach((product) => {
+    (Array.isArray(products) ? products : []).forEach((product) => {
       const name = (product.name || '').trim();
       if (!name) return;
 
