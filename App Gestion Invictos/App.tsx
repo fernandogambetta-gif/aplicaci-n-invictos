@@ -313,8 +313,10 @@ const App: React.FC = () => {
     let count = 0;
     let amount = 0;
 
-    sales.forEach((sale) => {
-      if (!sale.receivable) return;
+    const safeSales = Array.isArray(sales) ? sales : [];
+
+    safeSales.forEach((sale) => {
+      if (!sale?.receivable) return;
 
       if (
         currentUser.role !== 'admin' &&
@@ -330,8 +332,13 @@ const App: React.FC = () => {
         ),
       );
 
-      sale.receivable.installments.forEach(
-        (installment) => {
+      const installments = Array.isArray(
+        sale.receivable.installments,
+      )
+        ? sale.receivable.installments
+        : [];
+
+      installments.forEach((installment) => {
           const installmentAmount = Math.max(
             0,
             Number(installment.amount || 0),
@@ -362,8 +369,7 @@ const App: React.FC = () => {
             count += 1;
             amount += remaining;
           }
-        },
-      );
+        });
     });
 
     return {
