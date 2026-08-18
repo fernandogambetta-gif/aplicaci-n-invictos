@@ -208,8 +208,8 @@ const App: React.FC = () => {
         StorageService.getSales(),
       ]);
 
-      setProducts(prods);
-      setSales(sls);
+      setProducts(Array.isArray(prods) ? prods : []);
+      setSales(Array.isArray(sls) ? sls : []);
     } catch (error) {
       console.error('❌ Error loading data from cloud', error);
     } finally {
@@ -526,7 +526,13 @@ const App: React.FC = () => {
         return <POS products={products} onSaleComplete={refreshData} currentUser={currentUser} />;
 
       case 'inventory':
-        return <Inventory products={products} currentUser={currentUser} onUpdate={refreshData} />;
+        return (
+          <Inventory
+            products={Array.isArray(products) ? products : []}
+            currentUser={currentUser}
+            onUpdate={refreshData}
+          />
+        );
 
       case 'history':
         return <SalesHistory sales={sales} currentUser={currentUser} onUpdate={refreshData} />;
