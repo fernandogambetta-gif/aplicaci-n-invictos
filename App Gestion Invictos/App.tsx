@@ -520,7 +520,7 @@ const App: React.FC = () => {
         return <POS products={products} onSaleComplete={refreshData} currentUser={currentUser} />;
 
       case 'inventory':
-        return <Inventory products={products} onUpdate={refreshData} />;
+        return <Inventory products={products} currentUser={currentUser} onUpdate={refreshData} />;
 
       case 'history':
         return <SalesHistory sales={sales} currentUser={currentUser} onUpdate={refreshData} />;
