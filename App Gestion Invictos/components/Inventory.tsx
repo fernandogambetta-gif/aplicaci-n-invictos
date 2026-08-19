@@ -2674,9 +2674,9 @@ const Inventory: React.FC<InventoryProps> = ({
       {/* CATEGORY MODAL */}
       {isCategoryModalOpen && (
         <Portal>
-          <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
-            <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
-              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+          <div className="fixed inset-0 bg-black/50 z-[9999] sm:flex sm:items-center sm:justify-center sm:p-4">
+            <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[90dvh] sm:max-w-lg sm:rounded-xl shadow-xl overflow-hidden animate-fade-in-up flex flex-col">
+              <div className="shrink-0 px-4 sm:px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                   <FolderCog size={20} className="text-slate-700" />
                   Categorías
@@ -2691,8 +2691,9 @@ const Inventory: React.FC<InventoryProps> = ({
                 </button>
               </div>
 
-              <div className="p-6 space-y-4">
-                <div className="flex gap-2">
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-4">
+                <div className="sticky top-0 z-10 -mx-1 p-1 bg-white/95 backdrop-blur">
+                  <div className="flex flex-col sm:flex-row gap-2">
                   <input
                     type="text"
                     placeholder="Nueva categoría..."
@@ -2711,6 +2712,7 @@ const Inventory: React.FC<InventoryProps> = ({
                     <Plus size={18} />
                     Agregar
                   </button>
+                  </div>
                 </div>
 
                 <div className="border border-slate-200 rounded-lg overflow-hidden">
@@ -2719,7 +2721,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       No hay categorías cargadas.
                     </div>
                   ) : (
-                    <div className="divide-y divide-slate-100">
+                    <div className="divide-y divide-slate-100 max-h-[52dvh] sm:max-h-[48vh] overflow-y-auto">
                       {categories.map((cat) => (
                         <div
                           key={cat.id}
@@ -2747,6 +2749,22 @@ const Inventory: React.FC<InventoryProps> = ({
                 <p className="text-[11px] text-slate-400">
                   Si eliminás una categoría usada por productos, los productos conservarán el texto guardado.
                 </p>
+              </div>
+
+              <div
+                className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4"
+                style={{
+                  paddingBottom:
+                    'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setIsCategoryModalOpen(false)}
+                  className="w-full py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
+                >
+                  Cerrar
+                </button>
               </div>
             </div>
           </div>
