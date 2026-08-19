@@ -1133,7 +1133,7 @@ const Inventory: React.FC<InventoryProps> = ({
   // Filtros
   // ===============================
 
-  const availableSizes = Array.from(
+  const filterAvailableSizes = Array.from(
     new Set(
       products
         .map((p) => (p.size || '').trim())
@@ -1389,7 +1389,7 @@ const Inventory: React.FC<InventoryProps> = ({
           onChange={(e) => setFilterSize(e.target.value)}
         >
           <option value="ALL">Todos los Talles</option>
-          {availableSizes.map((size) => (
+          {filterAvailableSizes.map((size) => (
             <option key={size} value={size}>
               {size}
             </option>
