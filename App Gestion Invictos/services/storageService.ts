@@ -348,6 +348,99 @@ export const StorageService = {
     await deleteDoc(doc(db, COLLECTIONS.CATEGORIES, id));
   },
 
+  /**
+   * Renombra una categoría y actualiza TODOS los productos que la tengan
+   * asignada. La relación actual se guarda por nombre, por eso el cambio
+   * debe propagarse a products.category.
+   *
+   * Devuelve la cantidad de productos actualizados.
+   */
+  renameCategoryAndProducts: async (
+    categoryId: string,
+    oldName: string,
+    newName: string,
+  ): Promise<number> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const cleanOldName = (oldName || '').trim();
+    const cleanNewName = (newName || '').trim();
+
+    if (!categoryId) {
+      throw new Error('No se pudo identificar la categoría.');
+    }
+
+    if (!cleanNewName) {
+      throw new Error('El nombre de la categoría no puede quedar vacío.');
+    }
+
+    // Evita nombres duplicados.
+    const categoriesSnap = await getDocs(
+      collection(db, COLLECTIONS.CATEGORIES),
+    );
+
+    const duplicateCategory = categoriesSnap.docs.find((categoryDoc) => {
+      if (categoryDoc.id === categoryId) return false;
+
+      const data = categoryDoc.data() as CategoryItem;
+
+      return (
+        (data.name || '').trim().toLowerCase() ===
+        cleanNewName.toLowerCase()
+      );
+    });
+
+    if (duplicateCategory) {
+      throw new Error(
+        `Ya existe una categoría llamada "${cleanNewName}".`,
+      );
+    }
+
+    // Se recorren los productos para cubrir también registros antiguos
+    // con diferencias de espacios o mayúsculas/minúsculas.
+    const productsSnap = await getDocs(
+      collection(db, COLLECTIONS.PRODUCTS),
+    );
+
+    const affectedProducts = productsSnap.docs.filter((productDoc) => {
+      const data = productDoc.data() as Product;
+
+      return (
+        (data.category || '').trim().toLowerCase() ===
+        cleanOldName.toLowerCase()
+      );
+    });
+
+    const now = Date.now();
+
+    // Firestore limita los batch a 500 operaciones.
+    for (let i = 0; i < affectedProducts.length; i += 400) {
+      const batch = writeBatch(db);
+
+      affectedProducts.slice(i, i + 400).forEach((productDoc) => {
+        batch.update(
+          doc(db, COLLECTIONS.PRODUCTS, productDoc.id),
+          {
+            category: cleanNewName,
+            updatedAt: now,
+          },
+        );
+      });
+
+      await batch.commit();
+    }
+
+    await setDoc(
+      doc(db, COLLECTIONS.CATEGORIES, categoryId),
+      cleanData({
+        id: categoryId,
+        name: cleanNewName,
+      }),
+      { merge: true },
+    );
+
+    return affectedProducts.length;
+  },
+
   // ================= PROVIDERS =================
   getProviders: async (): Promise<ProviderItem[]> => {
     if (!db) return [];
