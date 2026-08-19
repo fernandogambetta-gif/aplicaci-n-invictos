@@ -62,6 +62,32 @@ const COLLECTIONS = {
   INVENTORY_MOVEMENTS: 'inventoryMovements',
 };
 
+const DEFAULT_PRODUCT_SIZES = [
+  'XS',
+  'S',
+  'M',
+  'L',
+  'XL',
+  'XXL',
+  '3XL',
+  'Único',
+];
+
+const DEFAULT_PRODUCT_COLORS = [
+  'Negro',
+  'Blanco',
+  'Gris',
+  'Azul',
+  'Azul Marino',
+  'Rojo',
+  'Verde',
+  'Amarillo',
+  'Rosa',
+  'Violeta',
+  'Beige',
+  'Marrón',
+];
+
 const DEFAULT_SECURITY: UserSecurity = {
   failedAttempts: 0,
   lockoutUntil: null,
@@ -324,6 +350,140 @@ export const StorageService = {
       cleanData(config),
       { merge: true },
     );
+  },
+
+  /**
+   * Opciones reutilizables para el alta de productos.
+   * Combina valores predefinidos + valores guardados en config.
+   */
+  getVariantOptions: async (): Promise<{
+    sizes: string[];
+    colors: string[];
+  }> => {
+    if (!db) {
+      return {
+        sizes: [...DEFAULT_PRODUCT_SIZES],
+        colors: [...DEFAULT_PRODUCT_COLORS],
+      };
+    }
+
+    const snap = await getDoc(
+      doc(db, COLLECTIONS.CONFIG, 'main'),
+    );
+
+    const data: any = snap.exists() ? snap.data() : {};
+
+    const storedSizes = Array.isArray(data.productSizes)
+      ? data.productSizes
+      : [];
+
+    const storedColors = Array.isArray(data.productColors)
+      ? data.productColors
+      : [];
+
+    const mergeUnique = (values: unknown[]): string[] => {
+      const seen = new Set<string>();
+      const result: string[] = [];
+
+      values.forEach((value) => {
+        const clean = String(value || '')
+          .trim()
+          .replace(/\s+/g, ' ');
+
+        if (!clean) return;
+
+        const key = clean.toLowerCase();
+
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        result.push(clean);
+      });
+
+      return result;
+    };
+
+    return {
+      sizes: mergeUnique([
+        ...DEFAULT_PRODUCT_SIZES,
+        ...storedSizes,
+      ]),
+      colors: mergeUnique([
+        ...DEFAULT_PRODUCT_COLORS,
+        ...storedColors,
+      ]),
+    };
+  },
+
+  /**
+   * Guarda una nueva opción para futuras cargas.
+   * Usa transacción para no pisar opciones agregadas por otro usuario.
+   */
+  addVariantOption: async (
+    type: 'size' | 'color',
+    value: string,
+  ): Promise<string[]> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const cleanValue = (value || '')
+      .trim()
+      .replace(/\s+/g, ' ');
+
+    if (!cleanValue) {
+      throw new Error('La opción no puede quedar vacía.');
+    }
+
+    const configRef = doc(db, COLLECTIONS.CONFIG, 'main');
+
+    return runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(configRef);
+      const data: any = snap.exists() ? snap.data() : {};
+
+      const field =
+        type === 'size'
+          ? 'productSizes'
+          : 'productColors';
+
+      const defaults =
+        type === 'size'
+          ? DEFAULT_PRODUCT_SIZES
+          : DEFAULT_PRODUCT_COLORS;
+
+      const stored = Array.isArray(data[field])
+        ? data[field]
+        : [];
+
+      const combined = [...defaults, ...stored, cleanValue];
+
+      const seen = new Set<string>();
+
+      const normalized = combined
+        .map((item) =>
+          String(item || '')
+            .trim()
+            .replace(/\s+/g, ' '),
+        )
+        .filter((item) => {
+          if (!item) return false;
+
+          const key = item.toLowerCase();
+
+          if (seen.has(key)) return false;
+
+          seen.add(key);
+          return true;
+        });
+
+      transaction.set(
+        configRef,
+        {
+          [field]: normalized,
+        },
+        { merge: true },
+      );
+
+      return normalized;
+    });
   },
 
   // ================= CATEGORIES =================
