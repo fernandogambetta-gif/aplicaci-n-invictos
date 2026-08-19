@@ -86,7 +86,55 @@ const DEFAULT_PRODUCT_COLORS = [
   'Violeta',
   'Beige',
   'Marrón',
+  'Fucsia',
 ];
+
+const normalizeComparableText = (value: unknown): string =>
+  String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+const canonicalizeColor = (value: unknown): string => {
+  const clean = String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+  if (!clean) return '';
+
+  const key = normalizeComparableText(clean);
+
+  const aliases: Record<string, string> = {
+    negro: 'Negro',
+    negra: 'Negro',
+
+    blanco: 'Blanco',
+    blanca: 'Blanco',
+
+    rojo: 'Rojo',
+    roja: 'Rojo',
+
+    amarillo: 'Amarillo',
+    amarilla: 'Amarillo',
+
+    morado: 'Morado',
+    morada: 'Morado',
+
+    marron: 'Marrón',
+
+    fucsia: 'Fucsia',
+    fuxia: 'Fucsia',
+    fuxsia: 'Fucsia',
+    fuchsia: 'Fucsia',
+  };
+
+  return aliases[key] || clean;
+};
+
+const colorComparisonKey = (value: unknown): string =>
+  normalizeComparableText(canonicalizeColor(value));
 
 const DEFAULT_SECURITY: UserSecurity = {
   failedAttempts: 0,
@@ -381,7 +429,7 @@ export const StorageService = {
       ? data.productColors
       : [];
 
-    const mergeUnique = (values: unknown[]): string[] => {
+    const mergeUniqueSizes = (values: unknown[]): string[] => {
       const seen = new Set<string>();
       const result: string[] = [];
 
@@ -392,7 +440,7 @@ export const StorageService = {
 
         if (!clean) return;
 
-        const key = clean.toLowerCase();
+        const key = normalizeComparableText(clean);
 
         if (seen.has(key)) return;
 
@@ -403,12 +451,32 @@ export const StorageService = {
       return result;
     };
 
+    const mergeUniqueColors = (values: unknown[]): string[] => {
+      const seen = new Set<string>();
+      const result: string[] = [];
+
+      values.forEach((value) => {
+        const canonical = canonicalizeColor(value);
+
+        if (!canonical) return;
+
+        const key = colorComparisonKey(canonical);
+
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        result.push(canonical);
+      });
+
+      return result;
+    };
+
     return {
-      sizes: mergeUnique([
+      sizes: mergeUniqueSizes([
         ...DEFAULT_PRODUCT_SIZES,
         ...storedSizes,
       ]),
-      colors: mergeUnique([
+      colors: mergeUniqueColors([
         ...DEFAULT_PRODUCT_COLORS,
         ...storedColors,
       ]),
@@ -425,9 +493,14 @@ export const StorageService = {
   ): Promise<string[]> => {
     if (!db) throw new Error('Firestore no inicializado');
 
-    const cleanValue = (value || '')
+    const rawValue = (value || '')
       .trim()
       .replace(/\s+/g, ' ');
+
+    const cleanValue =
+      type === 'color'
+        ? canonicalizeColor(rawValue)
+        : rawValue;
 
     if (!cleanValue) {
       throw new Error('La opción no puede quedar vacía.');
@@ -458,15 +531,22 @@ export const StorageService = {
       const seen = new Set<string>();
 
       const normalized = combined
-        .map((item) =>
-          String(item || '')
+        .map((item) => {
+          const clean = String(item || '')
             .trim()
-            .replace(/\s+/g, ' '),
-        )
+            .replace(/\s+/g, ' ');
+
+          return type === 'color'
+            ? canonicalizeColor(clean)
+            : clean;
+        })
         .filter((item) => {
           if (!item) return false;
 
-          const key = item.toLowerCase();
+          const key =
+            type === 'color'
+              ? colorComparisonKey(item)
+              : normalizeComparableText(item);
 
           if (seen.has(key)) return false;
 
