@@ -54,6 +54,53 @@ const Portal: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   return createPortal(children, document.body);
 };
 
+const normalizeComparableText = (value: unknown): string =>
+  String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+const canonicalizeColor = (value: unknown): string => {
+  const clean = String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+  if (!clean) return '';
+
+  const key = normalizeComparableText(clean);
+
+  const aliases: Record<string, string> = {
+    negro: 'Negro',
+    negra: 'Negro',
+
+    blanco: 'Blanco',
+    blanca: 'Blanco',
+
+    rojo: 'Rojo',
+    roja: 'Rojo',
+
+    amarillo: 'Amarillo',
+    amarilla: 'Amarillo',
+
+    morado: 'Morado',
+    morada: 'Morado',
+
+    marron: 'Marrón',
+
+    fucsia: 'Fucsia',
+    fuxia: 'Fucsia',
+    fuxsia: 'Fucsia',
+    fuchsia: 'Fucsia',
+  };
+
+  return aliases[key] || clean;
+};
+
+const colorComparisonKey = (value: unknown): string =>
+  normalizeComparableText(canonicalizeColor(value));
+
 const Inventory: React.FC<InventoryProps> = ({
   products: incomingProducts,
   currentUser,
@@ -155,7 +202,7 @@ const Inventory: React.FC<InventoryProps> = ({
     setCategories(cats);
     setProviders(provs);
 
-    const normalizeList = (values: string[]): string[] => {
+    const normalizeSizeList = (values: string[]): string[] => {
       const seen = new Set<string>();
 
       return values
@@ -167,13 +214,33 @@ const Inventory: React.FC<InventoryProps> = ({
         .filter((value) => {
           if (!value) return false;
 
-          const key = value.toLowerCase();
+          const key = normalizeComparableText(value);
 
           if (seen.has(key)) return false;
 
           seen.add(key);
           return true;
         });
+    };
+
+    const normalizeColorList = (values: string[]): string[] => {
+      const seen = new Set<string>();
+      const result: string[] = [];
+
+      values.forEach((value) => {
+        const canonical = canonicalizeColor(value);
+
+        if (!canonical) return;
+
+        const key = colorComparisonKey(canonical);
+
+        if (seen.has(key)) return;
+
+        seen.add(key);
+        result.push(canonical);
+      });
+
+      return result;
     };
 
     // También incorpora talles/colores ya usados en productos existentes.
@@ -186,14 +253,14 @@ const Inventory: React.FC<InventoryProps> = ({
       .filter(Boolean);
 
     setAvailableSizes(
-      normalizeList([
+      normalizeSizeList([
         ...variantOptions.sizes,
         ...sizesFromProducts,
       ]),
     );
 
     setAvailableColors(
-      normalizeList([
+      normalizeColorList([
         ...variantOptions.colors,
         ...colorsFromProducts,
       ]),
@@ -355,17 +422,20 @@ const Inventory: React.FC<InventoryProps> = ({
 
   const toggleColor = (color: string) => {
     setNewProductColors((prev) => {
+      const canonical = canonicalizeColor(color);
+      const targetKey = colorComparisonKey(canonical);
+
       const exists = prev.some(
         (item) =>
-          item.toLowerCase() === color.toLowerCase(),
+          colorComparisonKey(item) === targetKey,
       );
 
       return exists
         ? prev.filter(
             (item) =>
-              item.toLowerCase() !== color.toLowerCase(),
+              colorComparisonKey(item) !== targetKey,
           )
-        : [...prev, color];
+        : [...prev, canonical];
     });
   };
 
@@ -414,13 +484,16 @@ const Inventory: React.FC<InventoryProps> = ({
   };
 
   const addColor = async () => {
-    const value = normalizeVariantValue(newColorInput);
+    const rawValue = normalizeVariantValue(newColorInput);
+    const value = canonicalizeColor(rawValue);
 
     if (!value) return;
 
+    const valueKey = colorComparisonKey(value);
+
     const existingOption = availableColors.find(
       (item) =>
-        item.toLowerCase() === value.toLowerCase(),
+        colorComparisonKey(item) === valueKey,
     );
 
     const finalValue = existingOption || value;
@@ -447,8 +520,8 @@ const Inventory: React.FC<InventoryProps> = ({
     setNewProductColors((prev) =>
       prev.some(
         (item) =>
-          item.toLowerCase() ===
-          finalValue.toLowerCase(),
+          colorComparisonKey(item) ===
+          colorComparisonKey(finalValue),
       )
         ? prev
         : [...prev, finalValue],
@@ -890,7 +963,7 @@ const Inventory: React.FC<InventoryProps> = ({
           minStock,
 
           size: variant.size.trim(),
-          color: variant.color.trim(),
+          color: canonicalizeColor(variant.color),
           gender: (formData.gender || '').trim(),
           description: (formData.description as string) || '',
           salesNote: (formData.salesNote as string) || '',
@@ -2517,8 +2590,8 @@ const Inventory: React.FC<InventoryProps> = ({
                               const selected =
                                 newProductColors.some(
                                   (item) =>
-                                    item.toLowerCase() ===
-                                    color.toLowerCase(),
+                                    colorComparisonKey(item) ===
+                                    colorComparisonKey(color),
                                 );
 
                               return (
