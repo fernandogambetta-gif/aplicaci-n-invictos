@@ -164,10 +164,10 @@ const ProfileModal: React.FC<ProfileModalProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-[10040] bg-black/55 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+    <div className="fixed inset-0 z-[10040] bg-black/55 sm:flex sm:items-center sm:justify-center sm:p-4">
+      <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-md sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
         <div
-          className={`px-6 py-4 border-b flex items-start justify-between gap-4 ${
+          className={`shrink-0 px-4 sm:px-6 py-4 border-b flex items-start justify-between gap-4 ${
             forceChange
               ? 'bg-amber-50 border-amber-200'
               : 'bg-slate-50 border-slate-200'
@@ -199,7 +199,7 @@ const ProfileModal: React.FC<ProfileModalProps> = ({
           )}
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-5">
           {forceChange && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex gap-3 text-sm text-amber-800">
               <ShieldCheck size={19} className="shrink-0 mt-0.5" />
@@ -259,6 +259,15 @@ const ProfileModal: React.FC<ProfileModalProps> = ({
             </div>
           )}
 
+        </div>
+
+        <div
+          className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4"
+          style={{
+            paddingBottom:
+              'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+          }}
+        >
           <div className={`grid gap-3 ${canClose ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {canClose && (
               <button
