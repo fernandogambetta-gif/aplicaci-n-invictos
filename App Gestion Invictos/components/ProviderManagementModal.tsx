@@ -327,8 +327,8 @@ const ProviderManagementModal: React.FC<ProviderManagementModalProps> = ({
   if (!open || typeof document === 'undefined') return null;
 
   return createPortal(
-    <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-3 sm:p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[94vh] overflow-hidden flex flex-col">
+    <div className="fixed inset-0 bg-black/50 z-[9999] sm:flex sm:items-center sm:justify-center sm:p-4">
+      <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-6xl sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
         {/* HEADER */}
         <div className="px-5 sm:px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-start justify-between gap-4 shrink-0">
           <div>
@@ -350,8 +350,14 @@ const ProviderManagementModal: React.FC<ProviderManagementModalProps> = ({
           </button>
         </div>
 
-        <div className="overflow-y-auto">
-          <div className="p-5 sm:p-6 space-y-6">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
+          <div
+            className="p-4 sm:p-6 space-y-6"
+            style={{
+              paddingBottom:
+                'calc(5.5rem + env(safe-area-inset-bottom, 0px))',
+            }}
+          >
             {error && (
               <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm">
                 {error}
@@ -657,12 +663,29 @@ const ProviderManagementModal: React.FC<ProviderManagementModalProps> = ({
                   />
                 </div>
 
-                <div className="flex justify-end">
+                <div
+                  className="sticky bottom-0 z-20 -mx-4 sm:-mx-5 px-4 sm:px-5 py-3 bg-white/95 backdrop-blur border-t border-slate-200 flex gap-3 justify-end"
+                  style={{
+                    paddingBottom:
+                      'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+                  }}
+                >
+                  {form.id && (
+                    <button
+                      type="button"
+                      onClick={resetForm}
+                      disabled={isSaving}
+                      className="px-4 py-2.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50"
+                    >
+                      Cancelar
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => void handleSave()}
                     disabled={isSaving}
-                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50"
+                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
                   >
                     {isSaving ? (
                       <Loader2 size={18} className="animate-spin" />
