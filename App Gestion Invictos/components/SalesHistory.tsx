@@ -10,6 +10,7 @@ import {
 } from '../types';
 import { StorageService } from '../services/storageService';
 import AccountsReceivablePanel from './AccountsReceivablePanel';
+import SaleAdjustmentModal from './SaleAdjustmentModal';
 import {
   Calendar,
   DollarSign,
@@ -22,6 +23,7 @@ import {
   Download,
   AlertTriangle,
   Filter,
+  ArrowLeftRight,
 } from 'lucide-react';
 
 interface SalesHistoryProps {
@@ -153,6 +155,8 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
 
     return 'sales';
   });
+
+  const [adjustmentSale, setAdjustmentSale] = useState<Sale | null>(null);
 
   const [periodType, setPeriodType] =
     useState<PeriodType>('month');
@@ -520,6 +524,69 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     [periodExpenses, expenseCategoryFilter],
   );
 
+  const saleAdjustments = (sale: Sale) =>
+    Array.isArray(sale.adjustments) ? sale.adjustments : [];
+
+  const saleAdjustmentDifference = (sale: Sale): number =>
+    saleAdjustments(sale).reduce(
+      (sum, adjustment) => sum + Number(adjustment.difference || 0),
+      0,
+    );
+
+  const saleNetTotal = (sale: Sale): number =>
+    Number(sale.total || 0) + saleAdjustmentDifference(sale);
+
+  const saleNetUnits = (sale: Sale): number => {
+    const baseUnits = sale.items.reduce(
+      (sum, item) => sum + Number(item.quantity || 0),
+      0,
+    );
+
+    return saleAdjustments(sale).reduce(
+      (units, adjustment) =>
+        units - Number(adjustment.returnedItem.quantity || 0) +
+        Number(adjustment.replacementItem?.quantity || 0),
+      baseUnits,
+    );
+  };
+
+  const saleNetCost = (sale: Sale): {
+    cost: number;
+    estimated: boolean;
+    missing: boolean;
+  } => {
+    let cost = 0;
+    let estimated = false;
+    let missing = false;
+
+    sale.items.forEach((item) => {
+      const result = resolveItemCost(item);
+      cost += result.cost;
+      estimated ||= result.estimated;
+      missing ||= result.missing;
+    });
+
+    saleAdjustments(sale).forEach((adjustment) => {
+      if (adjustment.returnedItem.returnToStock) {
+        cost -=
+          Math.max(0, Number(adjustment.returnedItem.costAtSale || 0)) *
+          Math.max(0, Number(adjustment.returnedItem.quantity || 0));
+      }
+
+      if (adjustment.replacementItem) {
+        cost +=
+          Math.max(0, Number(adjustment.replacementItem.costAtSale || 0)) *
+          Math.max(0, Number(adjustment.replacementItem.quantity || 0));
+      }
+    });
+
+    return {
+      cost: Math.max(0, cost),
+      estimated,
+      missing,
+    };
+  };
+
   const summary = useMemo(() => {
     let units = 0;
     let merchandiseCost = 0;
@@ -528,28 +595,21 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     let missingCostItems = 0;
 
     filteredSales.forEach((sale) => {
+      units += saleNetUnits(sale);
+
       sale.items.forEach((item) => {
-        units += Number(item.quantity || 0);
-        commissions += Number(
-          item.commissionAmount || 0,
-        );
-
-        const result = resolveItemCost(item);
-        merchandiseCost += result.cost;
-
-        if (result.estimated) {
-          estimatedCostItems += 1;
-        }
-
-        if (result.missing) {
-          missingCostItems += 1;
-        }
+        commissions += Number(item.commissionAmount || 0);
       });
+
+      const result = saleNetCost(sale);
+      merchandiseCost += result.cost;
+
+      if (result.estimated) estimatedCostItems += 1;
+      if (result.missing) missingCostItems += 1;
     });
 
     const revenue = filteredSales.reduce(
-      (acc, sale) =>
-        acc + Number(sale.total || 0),
+      (acc, sale) => acc + saleNetTotal(sale),
       0,
     );
 
@@ -621,30 +681,25 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
           };
 
         current.tickets += 1;
-        current.revenue += Number(
-          sale.total || 0,
-        );
+        current.revenue += saleNetTotal(sale);
+        current.units += saleNetUnits(sale);
 
         sale.items.forEach((item) => {
-          current.units += Number(
-            item.quantity || 0,
-          );
-
           current.commissions += Number(
             item.commissionAmount || 0,
           );
-
-          const cost = resolveItemCost(item);
-          current.merchandiseCost += cost.cost;
-
-          if (cost.estimated) {
-            current.estimatedCostItems += 1;
-          }
-
-          if (cost.missing) {
-            current.missingCostItems += 1;
-          }
         });
+
+        const cost = saleNetCost(sale);
+        current.merchandiseCost += cost.cost;
+
+        if (cost.estimated) {
+          current.estimatedCostItems += 1;
+        }
+
+        if (cost.missing) {
+          current.missingCostItems += 1;
+        }
 
         current.grossMargin =
           current.revenue -
@@ -932,7 +987,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                 sale.paymentMethod,
               ),
             ),
-            Number(sale.total || 0),
+            saleNetTotal(sale),
           ].join(','),
         );
       });
@@ -1485,7 +1540,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                   <Th>Productos</Th>
                   <Th>Pago</Th>
                   <Th align="right">
-                    Venta
+                    Venta neta
                   </Th>
 
                   {isAdmin && (
@@ -1503,48 +1558,32 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                       Aporte
                     </Th>
                   )}
+
+                  <Th align="right">
+                    Acción
+                  </Th>
                 </tr>
               </thead>
 
               <tbody className="divide-y divide-slate-100">
                 {filteredSales.map(
                   (sale) => {
-                    let saleCost = 0;
-                    let saleCommission =
-                      0;
-                    let estimated = false;
-                    let missing = false;
+                    const netCost = saleNetCost(sale);
+                    const saleCost = netCost.cost;
+                    const estimated = netCost.estimated;
+                    const missing = netCost.missing;
 
-                    sale.items.forEach(
-                      (item) => {
-                        const result =
-                          resolveItemCost(
-                            item,
-                          );
-
-                        saleCost +=
-                          result.cost;
-
-                        saleCommission +=
-                          Number(
-                            item.commissionAmount ||
-                              0,
-                          );
-
-                        estimated ||=
-                          result.estimated;
-
-                        missing ||=
-                          result.missing;
-                      },
+                    const saleCommission = sale.items.reduce(
+                      (sum, item) =>
+                        sum + Number(item.commissionAmount || 0),
+                      0,
                     );
 
+                    const netTotal = saleNetTotal(sale);
+                    const adjustments = saleAdjustments(sale);
+
                     const contribution =
-                      Number(
-                        sale.total || 0,
-                      ) -
-                      saleCost -
-                      saleCommission;
+                      netTotal - saleCost - saleCommission;
 
                     return (
                       <tr
@@ -1634,6 +1673,55 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                               ),
                             )}
                           </div>
+
+                          {adjustments.length > 0 && (
+                            <div className="mt-2 pt-2 border-t border-slate-100 space-y-1.5">
+                              {adjustments.map((adjustment) => (
+                                <div
+                                  key={adjustment.id}
+                                  className="text-[11px] text-slate-600 bg-slate-50 rounded-lg px-2 py-1.5"
+                                >
+                                  <div className="font-bold text-indigo-700 flex items-center gap-1">
+                                    <ArrowLeftRight size={12} />
+                                    {adjustment.type === 'exchange'
+                                      ? 'Cambio'
+                                      : 'Devolución'}{' '}
+                                    · {formatDate(adjustment.timestamp)}
+                                  </div>
+                                  <div className="mt-1">
+                                    Volvió: {adjustment.returnedItem.quantity}×{' '}
+                                    {adjustment.returnedItem.productName}
+                                    {adjustment.returnedItem.size
+                                      ? ` · T. ${adjustment.returnedItem.size}`
+                                      : ''}
+                                    {adjustment.returnedItem.color
+                                      ? ` · ${adjustment.returnedItem.color}`
+                                      : ''}
+                                  </div>
+                                  {adjustment.replacementItem && (
+                                    <div>
+                                      Salió: {adjustment.replacementItem.quantity}×{' '}
+                                      {adjustment.replacementItem.productName}
+                                      {adjustment.replacementItem.size
+                                        ? ` · T. ${adjustment.replacementItem.size}`
+                                        : ''}
+                                      {adjustment.replacementItem.color
+                                        ? ` · ${adjustment.replacementItem.color}`
+                                        : ''}
+                                    </div>
+                                  )}
+                                  <div className="mt-1 text-slate-500">
+                                    {Math.abs(Number(adjustment.difference || 0)) < 0.01
+                                      ? 'Sin diferencia'
+                                      : Number(adjustment.difference || 0) > 0
+                                        ? `Cobrado: $${money(Math.abs(Number(adjustment.difference || 0)))}`
+                                        : `Devuelto/saldo a favor: $${money(Math.abs(Number(adjustment.difference || 0)))}`}
+                                    {' · '}Registrado por {adjustment.recordedByUserName}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </Td>
 
                         <Td>
@@ -1646,7 +1734,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                           <span className="font-bold">
                             $
                             {money(
-                              sale.total,
+                              netTotal,
                             )}
                           </span>
                         </Td>
@@ -1695,6 +1783,19 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                             </span>
                           </Td>
                         )}
+
+                        <Td align="right">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAdjustmentSale(sale)
+                            }
+                            className="px-3 py-2 rounded-lg bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold inline-flex items-center gap-1.5"
+                          >
+                            <ArrowLeftRight size={15} />
+                            Cambio / Devolución
+                          </button>
+                        </Td>
                       </tr>
                     );
                   },
@@ -1704,7 +1805,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                   <tr>
                     <td
                       colSpan={
-                        isAdmin ? 8 : 6
+                        isAdmin ? 9 : 7
                       }
                       className="p-10 text-center text-slate-400"
                     >
@@ -2134,6 +2235,17 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
             </div>
           </div>
         )}
+
+      {adjustmentSale && (
+        <SaleAdjustmentModal
+          sale={adjustmentSale}
+          currentUser={currentUser}
+          onClose={() => setAdjustmentSale(null)}
+          onSaved={async () => {
+            await Promise.resolve(onUpdate?.());
+          }}
+        />
+      )}
 
       {isAdmin &&
         isExpenseModalOpen && (
