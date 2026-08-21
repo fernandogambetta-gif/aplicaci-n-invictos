@@ -100,6 +100,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     toDateTimeLocalValue(new Date()),
   );
 
+  // Cliente opcional. Sirve para localizar luego la venta por nombre.
+  const [saleCustomerName, setSaleCustomerName] = useState('');
+
   // Selector de productos en formato lista
   const [productPickerOpen, setProductPickerOpen] = useState(false);
   const [productSearch, setProductSearch] = useState('');
@@ -958,6 +961,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         // Fecha/hora real de la venta.
         timestamp: selectedSaleTimestamp,
 
+        // Cliente opcional.
+        customerName: saleCustomerName.trim() || undefined,
+
         paymentMethod,
         payments: getPaymentsForSale(),
         receivable,
@@ -1002,6 +1008,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       // Evita heredar una imputación anterior por error.
       setSaleUserId(currentUser.id);
       setSaleDateTime(toDateTimeLocalValue(new Date()));
+      setSaleCustomerName('');
 
       await onSaleComplete();
 
@@ -1135,6 +1142,33 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             <div className="text-xl font-bold text-indigo-700">
               ${formatMoney(finalTotal)}
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-xl p-4">
+        <div className="flex items-start gap-2">
+          <UserRound
+            size={19}
+            className="text-slate-500 shrink-0 mt-0.5"
+          />
+
+          <div className="flex-1 min-w-0">
+            <label className="block text-sm font-bold text-slate-800">
+              Cliente <span className="font-normal text-slate-400">(opcional)</span>
+            </label>
+
+            <p className="text-xs text-slate-500 mt-0.5 mb-2">
+              Si lo cargás, después podrás encontrar esta venta por nombre para un cambio o devolución.
+            </p>
+
+            <input
+              type="text"
+              value={saleCustomerName}
+              onChange={(e) => setSaleCustomerName(e.target.value)}
+              placeholder="Nombre y apellido / Razón social"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
           </div>
         </div>
       </div>
