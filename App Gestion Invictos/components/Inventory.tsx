@@ -1,6 +1,3 @@
-Inventory.tsx
-
-
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Product, CategoryItem, ProviderItem, User } from '../types';
