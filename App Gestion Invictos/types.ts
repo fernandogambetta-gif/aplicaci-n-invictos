@@ -254,6 +254,10 @@ export interface Sale {
 
   timestamp: number;
 
+  // Cliente de la venta. Es opcional para ventas comunes.
+  // Permite localizar rápidamente la operación ante cambios/devoluciones.
+  customerName?: string;
+
   // Para ventas mixtas se guarda 'mixed' y el detalle queda en payments.
   paymentMethod: SalePaymentMethod;
   payments?: PaymentAllocation[];
