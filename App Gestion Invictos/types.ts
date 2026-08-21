@@ -184,6 +184,61 @@ export interface SaleItem {
   salesNote?: string;
 }
 
+export type SaleAdjustmentType = 'exchange' | 'return';
+
+export interface SaleAdjustmentLine {
+  // Identifica la línea dentro de la venta efectiva.
+  // Las líneas originales usan orig-<indice>; los reemplazos tienen un id propio.
+  lineId: string;
+
+  productId: string;
+  productName: string;
+  productCode?: string;
+  shortCode?: string;
+  barcode?: string;
+  size?: string;
+  color?: string;
+
+  quantity: number;
+  unitAmount: number;
+  totalAmount: number;
+  costAtSale?: number;
+}
+
+export interface SaleReturnedLine extends SaleAdjustmentLine {
+  sourceLineId: string;
+  returnToStock: boolean;
+}
+
+export interface SaleAdjustmentSettlement {
+  direction: 'charge' | 'refund' | 'none';
+  amount: number;
+  method?: Exclude<PaymentMethod, 'account'>;
+  receiptNumber?: string;
+}
+
+export interface SaleAdjustment {
+  id: string;
+  type: SaleAdjustmentType;
+  timestamp: number;
+
+  returnedItem: SaleReturnedLine;
+  replacementItem?: SaleAdjustmentLine;
+
+  // Positivo: diferencia cobrada al cliente.
+  // Negativo: devolución/saldo a favor del cliente.
+  difference: number;
+  settlement: SaleAdjustmentSettlement;
+
+  notes?: string;
+  recordedByUserId: string;
+  recordedByUserName: string;
+
+  // Ajuste de comisión generado por este movimiento.
+  commissionAdjustment: number;
+  commissionWasAlreadyPaid?: boolean;
+}
+
 export interface Sale {
   id: string;
   items: SaleItem[];
@@ -217,6 +272,14 @@ export interface Sale {
 
   commissionPaid?: boolean;
   commissionPaidDate?: number;
+
+  // Cambios/devoluciones vinculados a la venta original.
+  adjustments?: SaleAdjustment[];
+
+  // Base histórica para recalcular comisión sin perder la tasa original.
+  commissionBaseAmount?: number;
+  commissionBaseItemAmounts?: number[];
+  commissionAdjustmentTotal?: number;
 }
 
 export type ExpenseCategory =
