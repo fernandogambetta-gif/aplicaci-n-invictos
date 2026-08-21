@@ -9,6 +9,8 @@ import {
   Expense,
   PaymentMethod,
   ReceivablePayment,
+  SaleAdjustment,
+  SaleAdjustmentLine,
 } from '../types';
 
 import {
@@ -1291,6 +1293,406 @@ export const StorageService = {
         }),
       });
     });
+  },
+
+  /**
+   * CAMBIO / DEVOLUCIÓN ATÓMICA
+   *
+   * - conserva la venta original;
+   * - registra un adjustment dentro de la venta;
+   * - devuelve stock cuando corresponde;
+   * - descuenta el producto de reemplazo;
+   * - permite volver a cambiar productos que provinieron de un cambio anterior;
+   * - recalcula la comisión total de la venta usando la tasa original.
+   */
+  registerSaleAdjustment: async (
+    saleId: string,
+    input: {
+      sourceLineId: string;
+      quantity: number;
+      returnToStock: boolean;
+      replacementProductId?: string;
+      replacementQuantity?: number;
+      settlementMethod?: Exclude<PaymentMethod, 'account'>;
+      receiptNumber?: string;
+      notes?: string;
+      userId: string;
+      userName: string;
+      timestamp?: number;
+    },
+  ): Promise<SaleAdjustment> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const quantity = Math.floor(Number(input.quantity));
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error('La cantidad devuelta debe ser mayor que cero.');
+    }
+
+    const replacementQuantity = input.replacementProductId
+      ? Math.floor(Number(input.replacementQuantity || 1))
+      : 0;
+
+    if (
+      input.replacementProductId &&
+      (!Number.isFinite(replacementQuantity) || replacementQuantity <= 0)
+    ) {
+      throw new Error('La cantidad del producto nuevo debe ser mayor que cero.');
+    }
+
+    const result = await runTransaction(db, async (transaction) => {
+      const saleRef = doc(db, COLLECTIONS.SALES, saleId);
+      const saleSnap = await transaction.get(saleRef);
+
+      if (!saleSnap.exists()) {
+        throw new Error('La venta ya no existe.');
+      }
+
+      const sale = saleSnap.data() as Sale;
+      const adjustments = Array.isArray(sale.adjustments)
+        ? sale.adjustments
+        : [];
+
+      if (sale.receivable) {
+        const outstanding = (Array.isArray(sale.receivable.installments)
+          ? sale.receivable.installments
+          : []
+        ).reduce(
+          (sum, installment) =>
+            sum +
+            Math.max(
+              0,
+              Number(installment.amount || 0) -
+                Number(installment.paidAmount || 0),
+            ),
+          0,
+        );
+
+        if (outstanding > 0.009) {
+          throw new Error(
+            `Esta venta tiene $${outstanding.toLocaleString('es-AR')} pendientes en cuenta corriente. Regularizá primero ese saldo antes de registrar un cambio/devolución.`,
+          );
+        }
+      }
+
+      type EffectiveLine = SaleAdjustmentLine & {
+        availableQuantity: number;
+      };
+
+      const lines = new Map<string, EffectiveLine>();
+
+      sale.items.forEach((item, index) => {
+        const originalQuantity = Math.max(
+          0,
+          Math.floor(Number(item.quantity || 0)),
+        );
+
+        const unitAmount = originalQuantity > 0
+          ? Number(item.subtotal || 0) / originalQuantity
+          : Number(item.priceAtSale || 0);
+
+        const lineId = `orig-${index}`;
+
+        lines.set(lineId, {
+          lineId,
+          productId: item.productId,
+          productName: item.productName,
+          productCode: item.productCode,
+          shortCode: item.shortCode,
+          barcode: item.barcode,
+          size: item.size,
+          color: item.color,
+          quantity: originalQuantity,
+          availableQuantity: originalQuantity,
+          unitAmount: Math.max(0, unitAmount),
+          totalAmount: Math.max(0, unitAmount) * originalQuantity,
+          costAtSale: Number.isFinite(Number(item.costAtSale))
+            ? Math.max(0, Number(item.costAtSale))
+            : undefined,
+        });
+      });
+
+      adjustments.forEach((adjustment) => {
+        const source = lines.get(adjustment.returnedItem.sourceLineId);
+
+        if (source) {
+          source.availableQuantity = Math.max(
+            0,
+            source.availableQuantity -
+              Math.max(0, Number(adjustment.returnedItem.quantity || 0)),
+          );
+        }
+
+        if (adjustment.replacementItem) {
+          const replacement = adjustment.replacementItem;
+
+          lines.set(replacement.lineId, {
+            ...replacement,
+            availableQuantity: Math.max(
+              0,
+              Number(replacement.quantity || 0),
+            ),
+          });
+        }
+      });
+
+      const sourceLine = lines.get(input.sourceLineId);
+
+      if (!sourceLine) {
+        throw new Error('No se encontró el producto que se quiere devolver.');
+      }
+
+      if (sourceLine.availableQuantity < quantity) {
+        throw new Error(
+          `Solo quedan ${sourceLine.availableQuantity} unidad(es) disponibles para cambio/devolución.`,
+        );
+      }
+
+      const productIds = new Set<string>();
+
+      if (input.returnToStock) {
+        productIds.add(sourceLine.productId);
+      }
+
+      if (input.replacementProductId) {
+        productIds.add(input.replacementProductId);
+      }
+
+      const productSnapshots = new Map<string, any>();
+
+      for (const productId of Array.from(productIds)) {
+        const productRef = doc(db, COLLECTIONS.PRODUCTS, productId);
+        const snap = await transaction.get(productRef);
+
+        if (!snap.exists()) {
+          throw new Error(
+            productId === input.replacementProductId
+              ? 'El producto de reemplazo ya no existe.'
+              : 'El producto devuelto ya no existe en inventario.',
+          );
+        }
+
+        productSnapshots.set(productId, snap);
+      }
+
+      const stockDeltas = new Map<string, number>();
+
+      const addDelta = (productId: string, delta: number) => {
+        stockDeltas.set(
+          productId,
+          Number(stockDeltas.get(productId) || 0) + delta,
+        );
+      };
+
+      if (input.returnToStock) {
+        addDelta(sourceLine.productId, quantity);
+      }
+
+      let replacementItem: SaleAdjustmentLine | undefined;
+      const adjustmentId = `adj-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      if (input.replacementProductId) {
+        const replacementSnap = productSnapshots.get(
+          input.replacementProductId,
+        );
+
+        const product = replacementSnap.data() as Product;
+
+        addDelta(input.replacementProductId, -replacementQuantity);
+
+        replacementItem = {
+          lineId: `${adjustmentId}-new`,
+          productId: replacementSnap.id,
+          productName: product.name || 'Producto',
+          productCode: product.code,
+          shortCode: product.shortCode,
+          barcode: product.barcode,
+          size: product.size,
+          color: product.color,
+          quantity: replacementQuantity,
+          unitAmount: Math.max(0, Number(product.price || 0)),
+          totalAmount:
+            Math.max(0, Number(product.price || 0)) * replacementQuantity,
+          costAtSale: Math.max(0, Number(product.cost || 0)),
+        };
+      }
+
+      // Validar stocks resultantes considerando el movimiento neto.
+      for (const [productId, delta] of Array.from(stockDeltas.entries())) {
+        const snap = productSnapshots.get(productId);
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+        const nextStock = currentStock + delta;
+
+        if (nextStock < 0) {
+          throw new Error(
+            `Stock insuficiente para "${product.name}". Disponible: ${currentStock}.`,
+          );
+        }
+      }
+
+      const returnedUnitAmount = Math.max(0, Number(sourceLine.unitAmount || 0));
+      const returnedTotal = returnedUnitAmount * quantity;
+
+      const returnedCostAtSale = Number.isFinite(Number(sourceLine.costAtSale))
+        ? Math.max(0, Number(sourceLine.costAtSale))
+        : input.returnToStock
+          ? Math.max(
+              0,
+              Number(
+                (productSnapshots.get(sourceLine.productId)?.data() as Product | undefined)
+                  ?.cost || 0,
+              ),
+            )
+          : undefined;
+      const replacementTotal = replacementItem
+        ? Number(replacementItem.totalAmount || 0)
+        : 0;
+      const difference = replacementTotal - returnedTotal;
+
+      if (Math.abs(difference) >= 0.01 && !input.settlementMethod) {
+        throw new Error(
+          difference > 0
+            ? 'Seleccioná cómo se cobrará la diferencia.'
+            : 'Seleccioná cómo se realizará la devolución.',
+        );
+      }
+
+      const baseItemCommissions = Array.isArray(
+        sale.commissionBaseItemAmounts,
+      )
+        ? sale.commissionBaseItemAmounts.map((value) =>
+            Math.max(0, Number(value || 0)),
+          )
+        : sale.items.map((item) =>
+            Math.max(0, Number(item.commissionAmount || 0)),
+          );
+
+      const baseCommission = Number.isFinite(
+        Number(sale.commissionBaseAmount),
+      )
+        ? Math.max(0, Number(sale.commissionBaseAmount))
+        : baseItemCommissions.reduce((sum, value) => sum + value, 0);
+
+      const commissionRate = Number(sale.total || 0) > 0
+        ? baseCommission / Number(sale.total || 0)
+        : 0;
+
+      const commissionAdjustment = difference * commissionRate;
+      const previousCommissionAdjustment = Number(
+        sale.commissionAdjustmentTotal || 0,
+      );
+      const nextCommissionAdjustment =
+        previousCommissionAdjustment + commissionAdjustment;
+      const targetCommission = Math.max(
+        0,
+        baseCommission + nextCommissionAdjustment,
+      );
+
+      let adjustedItems = sale.items;
+
+      if (baseCommission > 0 && sale.items.length > 0) {
+        let accumulated = 0;
+
+        adjustedItems = sale.items.map((item, index) => {
+          let amount: number;
+
+          if (index === sale.items.length - 1) {
+            amount = Math.max(0, targetCommission - accumulated);
+          } else {
+            const baseItem = Math.max(
+              0,
+              Number(baseItemCommissions[index] || 0),
+            );
+            amount = targetCommission * (baseItem / baseCommission);
+            accumulated += amount;
+          }
+
+          return {
+            ...item,
+            commissionAmount: amount,
+          };
+        });
+      }
+
+      const now = input.timestamp || Date.now();
+
+      const adjustment: SaleAdjustment = {
+        id: adjustmentId,
+        type: replacementItem ? 'exchange' : 'return',
+        timestamp: now,
+        returnedItem: {
+          lineId: `${adjustmentId}-returned`,
+          sourceLineId: sourceLine.lineId,
+          productId: sourceLine.productId,
+          productName: sourceLine.productName,
+          productCode: sourceLine.productCode,
+          shortCode: sourceLine.shortCode,
+          barcode: sourceLine.barcode,
+          size: sourceLine.size,
+          color: sourceLine.color,
+          quantity,
+          unitAmount: returnedUnitAmount,
+          totalAmount: returnedTotal,
+          costAtSale: returnedCostAtSale,
+          returnToStock: Boolean(input.returnToStock),
+        },
+        replacementItem,
+        difference,
+        settlement: {
+          direction:
+            Math.abs(difference) < 0.01
+              ? 'none'
+              : difference > 0
+                ? 'charge'
+                : 'refund',
+          amount: Math.abs(difference),
+          method:
+            Math.abs(difference) < 0.01
+              ? undefined
+              : input.settlementMethod,
+          receiptNumber:
+            input.receiptNumber?.trim() || undefined,
+        },
+        notes: input.notes?.trim() || undefined,
+        recordedByUserId: input.userId,
+        recordedByUserName: input.userName,
+        commissionAdjustment,
+        commissionWasAlreadyPaid: Boolean(sale.commissionPaid),
+      };
+
+      // Aplicar stocks.
+      for (const [productId, delta] of Array.from(stockDeltas.entries())) {
+        const snap = productSnapshots.get(productId);
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+
+        transaction.update(
+          doc(db, COLLECTIONS.PRODUCTS, productId),
+          {
+            stock: currentStock + delta,
+            updatedAt: Date.now(),
+          },
+        );
+      }
+
+      transaction.update(
+        saleRef,
+        cleanData({
+          items: adjustedItems,
+          adjustments: [...adjustments, adjustment],
+          commissionBaseAmount: baseCommission,
+          commissionBaseItemAmounts: baseItemCommissions,
+          commissionAdjustmentTotal: nextCommissionAdjustment,
+        }),
+      );
+
+      return adjustment;
+    });
+
+    return result;
   },
 
   markCommissionsAsPaid: async (
