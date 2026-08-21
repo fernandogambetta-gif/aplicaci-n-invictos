@@ -24,6 +24,7 @@ import {
   AlertTriangle,
   Filter,
   ArrowLeftRight,
+  Search,
 } from 'lucide-react';
 
 interface SalesHistoryProps {
@@ -157,6 +158,9 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
   });
 
   const [adjustmentSale, setAdjustmentSale] = useState<Sale | null>(null);
+
+  // Búsqueda global del historial para ubicar ventas ante cambios/devoluciones.
+  const [saleSearch, setSaleSearch] = useState('');
 
   const [periodType, setPeriodType] =
     useState<PeriodType>('month');
@@ -399,6 +403,79 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     [periodSales, sellerFilter],
   );
 
+  const tableSales = useMemo(() => {
+    const term = saleSearch.trim().toLowerCase();
+
+    if (!term) return filteredSales;
+
+    // Cuando hay búsqueda, consulta todo el historial accesible.
+    return accessibleSales.filter((sale) => {
+      if (
+        sellerFilter !== 'ALL' &&
+        sale.userId !== sellerFilter
+      ) {
+        return false;
+      }
+
+      if (!saleMatchesPayment(sale)) {
+        return false;
+      }
+
+      const customer =
+        sale.customerName ||
+        sale.receivable?.customerName ||
+        '';
+
+      const adjustmentText = (sale.adjustments || [])
+        .map((adjustment) =>
+          [
+            adjustment.returnedItem?.productName,
+            adjustment.returnedItem?.productCode,
+            adjustment.returnedItem?.shortCode,
+            adjustment.replacementItem?.productName,
+            adjustment.replacementItem?.productCode,
+            adjustment.replacementItem?.shortCode,
+          ]
+            .filter(Boolean)
+            .join(' '),
+        )
+        .join(' ');
+
+      const itemText = sale.items
+        .map((item) =>
+          [
+            item.productName,
+            item.productCode,
+            item.shortCode,
+            item.barcode,
+            item.size,
+            item.color,
+          ]
+            .filter(Boolean)
+            .join(' '),
+        )
+        .join(' ');
+
+      const searchable = [
+        customer,
+        sale.userName,
+        sale.id,
+        itemText,
+        adjustmentText,
+      ]
+        .join(' ')
+        .toLowerCase();
+
+      return searchable.includes(term);
+    });
+  }, [
+    saleSearch,
+    filteredSales,
+    accessibleSales,
+    sellerFilter,
+    paymentFilter,
+  ]);
+
   const productMap = useMemo(
     () =>
       new Map(
@@ -594,7 +671,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     let estimatedCostItems = 0;
     let missingCostItems = 0;
 
-    filteredSales.forEach((sale) => {
+    tableSales.forEach((sale) => {
       units += saleNetUnits(sale);
 
       sale.items.forEach((item) => {
@@ -906,13 +983,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     )}"`;
 
   const exportSalesCsv = () => {
-    if (!filteredSales.length) return;
+    if (!tableSales.length) return;
 
     const rows = [
       [
         'Venta',
         'Fecha venta',
         'Vendedor',
+        'Cliente',
         'Cargada por',
         'Fecha carga',
         'Producto',
@@ -943,6 +1021,9 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
               ),
             ),
             csvEscape(sale.userName),
+            csvEscape(
+              sale.customerName || sale.receivable?.customerName || '',
+            ),
             csvEscape(
               sale.recordedByUserName || sale.userName,
             ),
@@ -1506,29 +1587,51 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
 
       {tab === 'sales' && (
         <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-          <div className="p-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="font-bold text-slate-800">
-                Detalle de ventas
+          <div className="p-4 border-b border-slate-200 space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <div className="font-bold text-slate-800">
+                  Detalle de ventas
+                </div>
+
+                <div className="text-xs text-slate-500 mt-1">
+                  {saleSearch.trim()
+                    ? `${tableSales.length} resultado(s) en todo el historial`
+                    : `${filteredSales.length} venta(s) en ${range.label}`}
+                </div>
               </div>
 
-              <div className="text-xs text-slate-500 mt-1">
-                {filteredSales.length}{' '}
-                venta(s) en {range.label}
-              </div>
+              <button
+                type="button"
+                onClick={exportSalesCsv}
+                disabled={!tableSales.length}
+                className="px-4 py-2.5 rounded-xl bg-slate-900 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-40"
+              >
+                <Download size={17} />
+                Exportar CSV
+              </button>
             </div>
 
-            <button
-              type="button"
-              onClick={exportSalesCsv}
-              disabled={
-                !filteredSales.length
-              }
-              className="px-4 py-2.5 rounded-xl bg-slate-900 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-40"
-            >
-              <Download size={17} />
-              Exportar CSV
-            </button>
+            <div className="relative">
+              <Search
+                size={17}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+
+              <input
+                type="text"
+                value={saleSearch}
+                onChange={(e) => setSaleSearch(e.target.value)}
+                placeholder="Buscar cliente, producto, código, vendedor o venta..."
+                className="w-full border border-slate-300 rounded-xl pl-9 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+
+              {saleSearch.trim() && (
+                <div className="text-[11px] text-indigo-600 mt-1.5">
+                  La búsqueda consulta todo el historial accesible, aunque el período seleccionado sea otro.
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="overflow-x-auto">
@@ -1536,6 +1639,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
               <thead className="bg-slate-50 border-b border-slate-200">
                 <tr>
                   <Th>Fecha</Th>
+                  <Th>Cliente</Th>
                   <Th>Vendedor</Th>
                   <Th>Productos</Th>
                   <Th>Pago</Th>
@@ -1566,7 +1670,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
               </thead>
 
               <tbody className="divide-y divide-slate-100">
-                {filteredSales.map(
+                {tableSales.map(
                   (sale) => {
                     const netCost = saleNetCost(sale);
                     const saleCost = netCost.cost;
@@ -1608,6 +1712,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                                   '2-digit',
                               },
                             )}
+                          </div>
+                        </Td>
+
+                        <Td>
+                          <div className="font-medium text-slate-800">
+                            {sale.customerName ||
+                              sale.receivable?.customerName ||
+                              '—'}
                           </div>
                         </Td>
 
@@ -1801,11 +1913,11 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                   },
                 )}
 
-                {!filteredSales.length && (
+                {!tableSales.length && (
                   <tr>
                     <td
                       colSpan={
-                        isAdmin ? 9 : 7
+                        isAdmin ? 10 : 8
                       }
                       className="p-10 text-center text-slate-400"
                     >
