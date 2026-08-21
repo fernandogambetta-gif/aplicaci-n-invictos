@@ -1,3 +1,6 @@
+Inventory.tsx
+
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Product, CategoryItem, ProviderItem, User } from '../types';
@@ -125,6 +128,11 @@ const Inventory: React.FC<InventoryProps> = ({
   const [scanError, setScanError] = useState('');
   const [labelProduct, setLabelProduct] = useState<Product | null>(null);
   const [labelStockEntryQuantity, setLabelStockEntryQuantity] = useState<number | undefined>(undefined);
+
+  // Resultado inmediato después de crear un producto / variantes.
+  // Permite ver los códigos y generar etiquetas sin tener que buscarlo.
+  const [createdProducts, setCreatedProducts] = useState<Product[]>([]);
+
   const [generateRestockLabels, setGenerateRestockLabels] = useState(false);
   const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
 
@@ -977,8 +985,11 @@ const Inventory: React.FC<InventoryProps> = ({
       await StorageService.saveProductsBatch(newProducts);
       await Promise.resolve(onUpdate());
 
+      // Cerramos el formulario de alta, pero mostramos inmediatamente
+      // el/los productos recién creados con todos sus códigos.
       setIsModalOpen(false);
       resetForm();
+      setCreatedProducts(newProducts);
     } catch (error: any) {
       console.error('Error creando producto y variantes:', error);
       setFormError(
@@ -1031,6 +1042,25 @@ const Inventory: React.FC<InventoryProps> = ({
   const closeLabelModal = () => {
     setLabelProduct(null);
     setLabelStockEntryQuantity(undefined);
+  };
+
+  const closeCreatedProducts = () => {
+    setCreatedProducts([]);
+  };
+
+  const openCreatedProduct = (product: Product) => {
+    setCreatedProducts([]);
+    handleEdit(product);
+  };
+
+  const openCreatedProductLabels = (product: Product) => {
+    const quantity = Math.max(0, Number(product.stock || 0));
+
+    if (quantity > 0) {
+      openStockEntryLabels(product, quantity);
+    } else {
+      openProductLabel(product);
+    }
   };
 
   // ===============================
@@ -1812,6 +1842,154 @@ const Inventory: React.FC<InventoryProps> = ({
         stockEntryQuantity={labelStockEntryQuantity}
         onClose={closeLabelModal}
       />
+
+      {createdProducts.length > 0 && (
+        <Portal>
+          <div className="fixed inset-0 z-[10005] bg-black/55 sm:flex sm:items-center sm:justify-center sm:p-4">
+            <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-4xl sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+              <div className="shrink-0 px-4 sm:px-6 py-4 bg-emerald-50 border-b border-emerald-200 flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-xs uppercase tracking-wide font-bold text-emerald-700">
+                    Alta completada
+                  </div>
+
+                  <h3 className="text-xl font-black text-slate-900 mt-1">
+                    {createdProducts.length === 1
+                      ? 'Producto creado correctamente'
+                      : `${createdProducts.length} variantes creadas correctamente`}
+                  </h3>
+
+                  <p className="text-sm text-slate-600 mt-1">
+                    Ya podés ver los códigos generados y crear las etiquetas sin buscar nuevamente el producto.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={closeCreatedProducts}
+                  className="p-1 text-slate-400 hover:text-slate-700"
+                  title="Cerrar"
+                >
+                  <X size={22} />
+                </button>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-3">
+                {createdProducts.map((product) => (
+                  <div
+                    key={product.id}
+                    className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden"
+                  >
+                    <div className="p-4 sm:p-5">
+                      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                        <div className="min-w-0 flex-1">
+                          <div className="font-black text-lg text-slate-900">
+                            {product.name}
+                          </div>
+
+                          <div className="text-sm text-slate-500 mt-1">
+                            {[product.size, product.color]
+                              .filter(Boolean)
+                              .join(' · ') || 'Sin variante'}
+                          </div>
+
+                          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-4">
+                            <div className="rounded-xl bg-indigo-50 border border-indigo-200 p-3">
+                              <div className="text-[10px] uppercase tracking-wide font-bold text-indigo-600">
+                                Código QR
+                              </div>
+                              <div className="text-2xl font-black text-indigo-900 mt-1">
+                                {product.shortCode || '—'}
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
+                              <div className="text-[10px] uppercase tracking-wide font-bold text-slate-500">
+                                SKU
+                              </div>
+                              <div className="font-bold text-slate-900 mt-1 break-all">
+                                {product.code || '—'}
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
+                              <div className="text-[10px] uppercase tracking-wide font-bold text-slate-500">
+                                Código de barras
+                              </div>
+                              <div className="font-bold text-slate-900 mt-1 break-all text-xs">
+                                {product.barcode || '—'}
+                              </div>
+                            </div>
+
+                            <div className="rounded-xl bg-slate-50 border border-slate-200 p-3">
+                              <div className="text-[10px] uppercase tracking-wide font-bold text-slate-500">
+                                Stock inicial
+                              </div>
+                              <div className="text-2xl font-black text-slate-900 mt-1">
+                                {Number(product.stock || 0)}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 lg:grid-cols-1 gap-2 lg:w-44 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => openCreatedProductLabels(product)}
+                            className="px-3 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center justify-center gap-2"
+                          >
+                            <Printer size={17} />
+                            {Number(product.stock || 0) > 1
+                              ? `Etiquetas (${Number(product.stock || 0)})`
+                              : 'Generar etiqueta'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => openCreatedProduct(product)}
+                            className="px-3 py-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold flex items-center justify-center gap-2"
+                          >
+                            <Edit2 size={17} />
+                            Abrir producto
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div
+                className="shrink-0 border-t border-slate-200 bg-slate-50 p-3 sm:p-4 flex flex-col-reverse sm:flex-row sm:justify-between gap-2"
+                style={{
+                  paddingBottom:
+                    'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={closeCreatedProducts}
+                  className="px-4 py-3 rounded-xl bg-white border border-slate-300 text-slate-700 font-semibold"
+                >
+                  Volver al inventario
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeCreatedProducts();
+                    handleOpenNewProduct();
+                  }}
+                  className="px-4 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center justify-center gap-2"
+                >
+                  <Plus size={18} />
+                  Crear otro producto
+                </button>
+              </div>
+            </div>
+          </div>
+        </Portal>
+      )}
 
       {scannedProduct && (
         <Portal>
