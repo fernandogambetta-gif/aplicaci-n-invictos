@@ -145,6 +145,33 @@ const DEFAULT_SECURITY: UserSecurity = {
   isPermanentlyBlocked: false,
 };
 
+const getUserByIdOrThrow = async (userId: string): Promise<User> => {
+  if (!db) throw new Error('Firestore no inicializado');
+  const snap = await getDoc(doc(db, COLLECTIONS.USERS, userId));
+  if (!snap.exists()) {
+    throw new Error('No se encontró el usuario que realiza la operación.');
+  }
+  return { ...(snap.data() as User), id: snap.id };
+};
+
+const assertAdminUser = async (userId: string): Promise<User> => {
+  const user = await getUserByIdOrThrow(userId);
+  if (user.role !== 'admin') {
+    throw new Error('Acceso denegado. Esta operación requiere un administrador.');
+  }
+  const security: UserSecurity = {
+    ...DEFAULT_SECURITY,
+    ...(user.security || {}),
+  };
+  if (security.isPermanentlyBlocked) {
+    throw new Error('El administrador seleccionado está bloqueado.');
+  }
+  if (security.lockoutUntil && security.lockoutUntil > Date.now()) {
+    throw new Error('El administrador seleccionado está temporalmente bloqueado.');
+  }
+  return user;
+};
+
 const mapDocs = <T>(snapshot: any): T[] =>
   snapshot.docs.map((d: any) => ({ ...d.data(), id: d.id })) as T[];
 
@@ -190,6 +217,22 @@ export const StorageService = {
       console.error('❌ Error leyendo users:', e?.code || e);
       throw e;
     }
+  },
+
+  getAdminAuthorizationOptions: async (): Promise<Array<{ id: string; name: string }>> => {
+    if (!db) return [];
+    const snap = await getDocs(
+      query(collection(db, COLLECTIONS.USERS), where('role', '==', 'admin')),
+    );
+    return snap.docs
+      .map((item) => {
+        const data = item.data() as User;
+        return {
+          id: item.id,
+          name: String(data.name || 'Administrador').trim(),
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'es'));
   },
 
   addUser: async (user: User): Promise<void> => {
@@ -1042,35 +1085,182 @@ export const StorageService = {
   updateProductCost: async (
     productId: string,
     newCost: number,
+    requestingUserId: string,
   ): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
-
+    await assertAdminUser(requestingUserId);
     await updateDoc(doc(db, COLLECTIONS.PRODUCTS, productId), {
       cost: newCost,
       updatedAt: Date.now(),
     });
   },
 
-  deleteProduct: async (id: string): Promise<void> => {
+  deleteProduct: async (
+    id: string,
+    requestingUserId: string,
+  ): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
     await deleteDoc(doc(db, COLLECTIONS.PRODUCTS, id));
   },
 
-  /**
-   * Se mantiene por compatibilidad con Inventory.tsx actual.
-   * Más adelante el ingreso de mercadería registrará historial.
-   */
   updateStock: async (
     productId: string,
     quantityChange: number,
+    requestingUserId: string,
   ): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
-
     if (!Number.isFinite(quantityChange) || quantityChange === 0) return;
-
+    await assertAdminUser(requestingUserId);
     await updateDoc(doc(db, COLLECTIONS.PRODUCTS, productId), {
       stock: increment(quantityChange),
       updatedAt: Date.now(),
+    });
+  },
+
+  restockProductAsAdmin: async (
+    productId: string,
+    quantity: number,
+    newCost: number,
+    adminUserId: string,
+  ): Promise<{ newStock: number; authorizedByName: string }> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const cleanQuantity = Number(quantity);
+    if (!Number.isFinite(cleanQuantity) || cleanQuantity <= 0) {
+      throw new Error('La cantidad a ingresar debe ser mayor que cero.');
+    }
+
+    const productRef = doc(db, COLLECTIONS.PRODUCTS, productId);
+    const adminRef = doc(db, COLLECTIONS.USERS, adminUserId);
+    const movementRef = doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS));
+
+    return runTransaction(db, async (transaction) => {
+      const adminSnap = await transaction.get(adminRef);
+      const productSnap = await transaction.get(productRef);
+
+      if (!adminSnap.exists()) throw new Error('No se encontró el administrador.');
+      const admin = { ...(adminSnap.data() as User), id: adminSnap.id };
+      if (admin.role !== 'admin') {
+        throw new Error('Acceso denegado. Solo un administrador puede confirmar este ingreso.');
+      }
+      if (!productSnap.exists()) throw new Error('El producto ya no existe en inventario.');
+
+      const product = { ...(productSnap.data() as Product), id: productSnap.id };
+      const previousStock = getNumericStock(product.stock);
+      const newStock = previousStock + cleanQuantity;
+      const now = Date.now();
+      const costToSave = Number(newCost);
+      const productUpdate: Record<string, unknown> = { stock: newStock, updatedAt: now };
+      if (Number.isFinite(costToSave) && costToSave > 0) productUpdate.cost = costToSave;
+
+      transaction.update(productRef, productUpdate);
+      transaction.set(movementRef, cleanData({
+        id: movementRef.id,
+        productId: product.id,
+        productName: product.name,
+        productCode: product.code,
+        barcode: product.barcode,
+        size: product.size,
+        color: product.color,
+        type: 'PURCHASE',
+        quantityChange: cleanQuantity,
+        previousStock,
+        newStock,
+        timestamp: now,
+        userId: admin.id,
+        userName: admin.name,
+        referenceId: `ADMIN:${admin.id}`,
+        note: 'Ingreso de mercadería confirmado por administrador.',
+        unitCost: Number.isFinite(costToSave) && costToSave > 0 ? costToSave : Number(product.cost || 0),
+      }));
+
+      return { newStock, authorizedByName: admin.name };
+    });
+  },
+
+  restockProductWithAdminAuthorization: async (
+    productId: string,
+    quantity: number,
+    newCost: number,
+    requestingUserId: string,
+    adminUserId: string,
+    adminPin: string,
+  ): Promise<{ newStock: number; authorizedByName: string }> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const cleanQuantity = Number(quantity);
+    const cleanPin = String(adminPin || '').trim();
+    if (!Number.isFinite(cleanQuantity) || cleanQuantity <= 0) {
+      throw new Error('La cantidad a ingresar debe ser mayor que cero.');
+    }
+    if (!/^\d{4}$/.test(cleanPin)) {
+      throw new Error('El PIN del administrador debe tener 4 números.');
+    }
+
+    const requesterRef = doc(db, COLLECTIONS.USERS, requestingUserId);
+    const adminRef = doc(db, COLLECTIONS.USERS, adminUserId);
+    const productRef = doc(db, COLLECTIONS.PRODUCTS, productId);
+    const movementRef = doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS));
+
+    return runTransaction(db, async (transaction) => {
+      const requesterSnap = await transaction.get(requesterRef);
+      const adminSnap = await transaction.get(adminRef);
+      const productSnap = await transaction.get(productRef);
+
+      if (!requesterSnap.exists()) throw new Error('No se encontró el vendedor que solicita el ingreso.');
+      const requester = { ...(requesterSnap.data() as User), id: requesterSnap.id };
+      if (requester.role !== 'seller') {
+        throw new Error('Esta autorización está reservada para ingresos solicitados por vendedores.');
+      }
+
+      if (!adminSnap.exists()) throw new Error('No se encontró el administrador seleccionado.');
+      const admin = { ...(adminSnap.data() as User), id: adminSnap.id };
+      if (admin.role !== 'admin') throw new Error('El usuario seleccionado no es administrador.');
+
+      const adminSecurity: UserSecurity = {
+        ...DEFAULT_SECURITY,
+        ...(admin.security || {}),
+      };
+      if (adminSecurity.isPermanentlyBlocked) {
+        throw new Error('El administrador seleccionado está bloqueado.');
+      }
+      if (adminSecurity.lockoutUntil && adminSecurity.lockoutUntil > Date.now()) {
+        throw new Error('El administrador seleccionado está temporalmente bloqueado.');
+      }
+      if (String(admin.pin || '').trim() !== cleanPin) {
+        throw new Error('PIN del administrador incorrecto.');
+      }
+      if (!productSnap.exists()) throw new Error('El producto ya no existe en inventario.');
+
+      const product = { ...(productSnap.data() as Product), id: productSnap.id };
+      const previousStock = getNumericStock(product.stock);
+      const newStock = previousStock + cleanQuantity;
+      const now = Date.now();
+      const costToSave = Number(newCost);
+      const productUpdate: Record<string, unknown> = { stock: newStock, updatedAt: now };
+      if (Number.isFinite(costToSave) && costToSave > 0) productUpdate.cost = costToSave;
+
+      transaction.update(productRef, productUpdate);
+      transaction.set(movementRef, cleanData({
+        id: movementRef.id,
+        productId: product.id,
+        productName: product.name,
+        productCode: product.code,
+        barcode: product.barcode,
+        size: product.size,
+        color: product.color,
+        type: 'PURCHASE',
+        quantityChange: cleanQuantity,
+        previousStock,
+        newStock,
+        timestamp: now,
+        userId: requester.id,
+        userName: requester.name,
+        referenceId: `AUTHORIZED_BY:${admin.id}`,
+        note: `Ingreso realizado por ${requester.name} y autorizado por ${admin.name}.`,
+        unitCost: Number.isFinite(costToSave) && costToSave > 0 ? costToSave : Number(product.cost || 0),
+      }));
+
+      return { newStock, authorizedByName: admin.name };
     });
   },
 
