@@ -1146,57 +1146,50 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-xl p-4">
-        <div className="flex items-start gap-2">
-          <UserRound
-            size={19}
-            className="text-slate-500 shrink-0 mt-0.5"
-          />
+      {currentUser.role !== 'admin' && (
+        <div className="bg-white border border-slate-200 rounded-xl p-3">
+          <div className="flex items-center gap-2">
+            <UserRound
+              size={18}
+              className="text-slate-500 shrink-0"
+            />
 
-          <div className="flex-1 min-w-0">
-            <label className="block text-sm font-bold text-slate-800">
+            <label className="text-sm font-bold text-slate-800 whitespace-nowrap">
               Cliente <span className="font-normal text-slate-400">(opcional)</span>
             </label>
-
-            <p className="text-xs text-slate-500 mt-0.5 mb-2">
-              Si lo cargás, después podrás encontrar esta venta por nombre para un cambio o devolución.
-            </p>
 
             <input
               type="text"
               value={saleCustomerName}
               onChange={(e) => setSaleCustomerName(e.target.value)}
               placeholder="Nombre y apellido / Razón social"
-              className="w-full border border-slate-300 rounded-lg px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="flex-1 min-w-0 border border-slate-300 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
           </div>
         </div>
-      </div>
+      )}
 
       {currentUser.role === 'admin' && (
-        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4">
-          <div className="flex items-start gap-2 mb-3">
+        <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3">
+          <div className="flex items-center gap-2 mb-2">
             <UserRound
-              size={19}
-              className="text-indigo-600 shrink-0 mt-0.5"
+              size={18}
+              className="text-indigo-600 shrink-0"
             />
 
-            <div>
-              <div className="font-bold text-indigo-900">
-                Datos reales de la venta
-              </div>
+            <div className="font-bold text-indigo-900">
+              Datos de la venta
+            </div>
 
-              <div className="text-xs text-indigo-700 mt-0.5">
-                Para cargar una venta realizada por otro usuario o en una
-                fecha anterior.
-              </div>
+            <div className="hidden lg:block text-[11px] text-indigo-600">
+              · Podés atribuirla a otro vendedor o a una fecha anterior.
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <div>
-              <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">
-                Usuario que realizó la venta
+              <label className="block text-[11px] font-bold text-indigo-800 uppercase mb-1">
+                Vendedor
               </label>
 
               <select
@@ -1205,7 +1198,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                   setSaleUserId(e.target.value);
                   setCheckoutError('');
                 }}
-                className="w-full border border-indigo-200 rounded-lg px-3 py-2.5 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full border border-indigo-200 rounded-lg px-3 py-2 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
                 {saleUsers.map((user) => (
                   <option key={user.id} value={user.id}>
@@ -1219,13 +1212,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             </div>
 
             <div>
-              <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">
-                Fecha y hora de la venta
+              <label className="block text-[11px] font-bold text-indigo-800 uppercase mb-1">
+                Fecha y hora
               </label>
 
               <div className="relative">
                 <CalendarClock
-                  size={17}
+                  size={16}
                   className="absolute left-3 top-1/2 -translate-y-1/2 text-indigo-400 pointer-events-none"
                 />
 
@@ -1237,15 +1230,30 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                     setSaleDateTime(e.target.value);
                     setCheckoutError('');
                   }}
-                  className="w-full border border-indigo-200 rounded-lg pl-9 pr-3 py-2.5 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  className="w-full border border-indigo-200 rounded-lg pl-9 pr-3 py-2 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
               </div>
             </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-indigo-800 uppercase mb-1">
+                Cliente <span className="font-normal normal-case text-indigo-500">(opcional)</span>
+              </label>
+
+              <input
+                type="text"
+                value={saleCustomerName}
+                onChange={(e) => setSaleCustomerName(e.target.value)}
+                placeholder="Nombre y apellido / Razón social"
+                className="w-full border border-indigo-200 rounded-lg px-3 py-2 bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
           </div>
 
-          <div className="mt-3 text-[11px] text-indigo-600">
-            La comisión se imputará a <b>{effectiveSaleUser.name}</b>.
-            La carga quedará registrada a nombre de <b>{currentUser.name}</b>.
+          <div className="mt-2 text-[11px] text-indigo-600">
+            Comisión: <b>{effectiveSaleUser.name}</b>
+            {' · '}
+            Registro: <b>{currentUser.name}</b>
           </div>
         </div>
       )}
