@@ -356,3 +356,125 @@ export interface DashboardStats {
   lowStockCount: number;
   topSellingCategory: string;
 }
+
+// ================= SOCIEDAD / PARTICIPACIONES =================
+
+export type SocietyValuationStatus = 'draft' | 'locked';
+
+export type SocietyAssetType =
+  | 'furniture'
+  | 'equipment'
+  | 'improvement'
+  | 'other_asset'
+  | 'intangible'
+  | 'liability';
+
+export interface SocietyValuation {
+  id: 'main';
+  status: SocietyValuationStatus;
+  valuationDate: number;
+
+  // Mercadería destinada a la venta.
+  inventorySuggestedValue: number;
+  inventoryAgreedValue: number;
+
+  notes?: string;
+
+  createdAt?: number;
+  createdByUserId?: string;
+  createdByUserName?: string;
+  updatedAt?: number;
+  updatedByUserId?: string;
+  updatedByUserName?: string;
+
+  lockedAt?: number;
+  lockedByUserId?: string;
+  lockedByUserName?: string;
+}
+
+export interface SocietyAsset {
+  id: string;
+  type: SocietyAssetType;
+  name: string;
+  quantity: number;
+
+  // Valor total acordado del bien o pasivo.
+  agreedValue: number;
+
+  // Si es false, se registra pero no entra en la valuación societaria.
+  includedInSociety: boolean;
+
+  // Para bienes particulares que están en el local pero no integran la sociedad.
+  ownerName?: string;
+  notes?: string;
+
+  createdAt?: number;
+  createdByUserId?: string;
+  createdByUserName?: string;
+  updatedAt?: number;
+  updatedByUserId?: string;
+  updatedByUserName?: string;
+}
+
+export type SocietyPartnerKind = 'original' | 'incoming';
+
+export interface SocietyInstallmentPlanItem {
+  id: string;
+  number: number;
+  dueDate: number;
+  amount: number;
+}
+
+export interface SocietyPartner {
+  id: string;
+  name: string;
+  kind: SocietyPartnerKind;
+
+  // Para socios originales: peso relativo de la propiedad previa al ingreso
+  // de nuevos socios. Con un único dueño, normalmente es 100.
+  initialOwnershipPercentage?: number;
+
+  // Para socios entrantes: porcentaje máximo acordado al completar su aporte.
+  targetPercentage?: number;
+
+  // Importe total que debe integrar para materializar el porcentaje objetivo.
+  requiredContribution?: number;
+
+  installmentPlan?: SocietyInstallmentPlanItem[];
+  notes?: string;
+  active?: boolean;
+
+  createdAt?: number;
+  createdByUserId?: string;
+  createdByUserName?: string;
+  updatedAt?: number;
+  updatedByUserId?: string;
+  updatedByUserName?: string;
+}
+
+export type SocietyContributionMethod =
+  | 'cash'
+  | 'transfer'
+  | 'card'
+  | 'other';
+
+export interface SocietyContribution {
+  id: string;
+  partnerId: string;
+  partnerName: string;
+  amount: number;
+  date: number;
+  method: SocietyContributionMethod;
+  receiptNumber?: string;
+  notes?: string;
+
+  recordedAt: number;
+  recordedByUserId: string;
+  recordedByUserName: string;
+
+  voided?: boolean;
+  voidedAt?: number;
+  voidedByUserId?: string;
+  voidedByUserName?: string;
+  voidReason?: string;
+}
