@@ -11,6 +11,10 @@ import {
   ReceivablePayment,
   SaleAdjustment,
   SaleAdjustmentLine,
+  SocietyValuation,
+  SocietyAsset,
+  SocietyPartner,
+  SocietyContribution,
 } from '../types';
 
 import {
@@ -59,6 +63,10 @@ const COLLECTIONS = {
   CATEGORIES: 'categories',
   PROVIDERS: 'providers',
   EXPENSES: 'expenses',
+  SOCIETY_CONFIG: 'societyConfig',
+  SOCIETY_ASSETS: 'societyAssets',
+  SOCIETY_PARTNERS: 'societyPartners',
+  SOCIETY_CONTRIBUTIONS: 'societyContributions',
 
   // Preparada para el próximo paso.
   INVENTORY_MOVEMENTS: 'inventoryMovements',
@@ -2021,6 +2029,555 @@ export const StorageService = {
       productsAdjusted: validRestores.length,
       missingProducts,
     };
+  },
+
+  // ================= SOCIEDAD / PARTICIPACIONES =================
+  getSocietyValuation: async (
+    requestingUserId: string,
+  ): Promise<SocietyValuation | null> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
+
+    const snap = await getDoc(
+      doc(db, COLLECTIONS.SOCIETY_CONFIG, 'main'),
+    );
+
+    if (!snap.exists()) return null;
+
+    return {
+      ...(snap.data() as SocietyValuation),
+      id: 'main',
+    };
+  },
+
+  saveSocietyValuationDraft: async (
+    valuation: SocietyValuation,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const admin = await assertAdminUser(requestingUserId);
+
+    const ref = doc(db, COLLECTIONS.SOCIETY_CONFIG, 'main');
+    const existing = await getDoc(ref);
+
+    if (
+      existing.exists() &&
+      (existing.data() as SocietyValuation).status === 'locked'
+    ) {
+      throw new Error(
+        'La valuación inicial ya fue cerrada y no puede modificarse.',
+      );
+    }
+
+    const inventorySuggestedValue = Number(
+      valuation.inventorySuggestedValue,
+    );
+    const inventoryAgreedValue = Number(
+      valuation.inventoryAgreedValue,
+    );
+
+    if (
+      !Number.isFinite(inventorySuggestedValue) ||
+      inventorySuggestedValue < 0 ||
+      !Number.isFinite(inventoryAgreedValue) ||
+      inventoryAgreedValue < 0
+    ) {
+      throw new Error('Los valores de inventario son inválidos.');
+    }
+
+    const now = Date.now();
+    const previous = existing.exists()
+      ? (existing.data() as SocietyValuation)
+      : null;
+
+    await setDoc(
+      ref,
+      cleanData({
+        ...valuation,
+        id: 'main',
+        status: 'draft',
+        inventorySuggestedValue,
+        inventoryAgreedValue,
+        createdAt: previous?.createdAt || valuation.createdAt || now,
+        createdByUserId:
+          previous?.createdByUserId || valuation.createdByUserId || admin.id,
+        createdByUserName:
+          previous?.createdByUserName || valuation.createdByUserName || admin.name,
+        updatedAt: now,
+        updatedByUserId: admin.id,
+        updatedByUserName: admin.name,
+      }),
+      { merge: true },
+    );
+  },
+
+  lockSocietyValuation: async (
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const admin = await assertAdminUser(requestingUserId);
+    const ref = doc(db, COLLECTIONS.SOCIETY_CONFIG, 'main');
+
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(ref);
+
+      if (!snap.exists()) {
+        throw new Error(
+          'Primero guardá la valuación inicial antes de cerrarla.',
+        );
+      }
+
+      const data = snap.data() as SocietyValuation;
+
+      if (data.status === 'locked') return;
+
+      const now = Date.now();
+
+      transaction.update(ref, {
+        status: 'locked',
+        lockedAt: now,
+        lockedByUserId: admin.id,
+        lockedByUserName: admin.name,
+        updatedAt: now,
+        updatedByUserId: admin.id,
+        updatedByUserName: admin.name,
+      });
+    });
+  },
+
+  getSocietyAssets: async (
+    requestingUserId: string,
+  ): Promise<SocietyAsset[]> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
+
+    const snap = await getDocs(
+      collection(db, COLLECTIONS.SOCIETY_ASSETS),
+    );
+
+    return mapDocs<SocietyAsset>(snap).sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''), 'es'),
+    );
+  },
+
+  saveSocietyAsset: async (
+    asset: SocietyAsset,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const admin = await assertAdminUser(requestingUserId);
+
+    const valuationSnap = await getDoc(
+      doc(db, COLLECTIONS.SOCIETY_CONFIG, 'main'),
+    );
+
+    if (
+      valuationSnap.exists() &&
+      (valuationSnap.data() as SocietyValuation).status === 'locked'
+    ) {
+      throw new Error(
+        'La valuación inicial está cerrada. Los bienes de esa valuación ya no pueden modificarse.',
+      );
+    }
+
+    const cleanName = String(asset.name || '').trim();
+    const quantity = Number(asset.quantity);
+    const agreedValue = Number(asset.agreedValue);
+
+    if (!cleanName) throw new Error('Indicá el nombre del bien o pasivo.');
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error('La cantidad debe ser mayor que cero.');
+    }
+    if (!Number.isFinite(agreedValue) || agreedValue < 0) {
+      throw new Error('El valor acordado es inválido.');
+    }
+    if (!asset.includedInSociety && !String(asset.ownerName || '').trim()) {
+      throw new Error(
+        'Para un bien excluido indicá quién conserva su propiedad.',
+      );
+    }
+
+    const ref = doc(db, COLLECTIONS.SOCIETY_ASSETS, asset.id);
+    const existing = await getDoc(ref);
+    const previous = existing.exists()
+      ? (existing.data() as SocietyAsset)
+      : null;
+    const now = Date.now();
+
+    await setDoc(
+      ref,
+      cleanData({
+        ...asset,
+        id: asset.id,
+        name: cleanName,
+        quantity,
+        agreedValue,
+        ownerName: asset.includedInSociety
+          ? undefined
+          : String(asset.ownerName || '').trim(),
+        createdAt: previous?.createdAt || asset.createdAt || now,
+        createdByUserId:
+          previous?.createdByUserId || asset.createdByUserId || admin.id,
+        createdByUserName:
+          previous?.createdByUserName || asset.createdByUserName || admin.name,
+        updatedAt: now,
+        updatedByUserId: admin.id,
+        updatedByUserName: admin.name,
+      }),
+      { merge: true },
+    );
+  },
+
+  deleteSocietyAsset: async (
+    assetId: string,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
+
+    const valuationSnap = await getDoc(
+      doc(db, COLLECTIONS.SOCIETY_CONFIG, 'main'),
+    );
+
+    if (
+      valuationSnap.exists() &&
+      (valuationSnap.data() as SocietyValuation).status === 'locked'
+    ) {
+      throw new Error(
+        'La valuación inicial está cerrada. Los bienes ya no pueden eliminarse.',
+      );
+    }
+
+    await deleteDoc(doc(db, COLLECTIONS.SOCIETY_ASSETS, assetId));
+  },
+
+  getSocietyPartners: async (
+    requestingUserId: string,
+  ): Promise<SocietyPartner[]> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
+
+    const snap = await getDocs(
+      collection(db, COLLECTIONS.SOCIETY_PARTNERS),
+    );
+
+    return mapDocs<SocietyPartner>(snap).sort((a, b) => {
+      if (a.kind !== b.kind) return a.kind === 'original' ? -1 : 1;
+      return String(a.name || '').localeCompare(String(b.name || ''), 'es');
+    });
+  },
+
+  saveSocietyPartner: async (
+    partner: SocietyPartner,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const admin = await assertAdminUser(requestingUserId);
+
+    const cleanName = String(partner.name || '').trim();
+    if (!cleanName) throw new Error('Indicá el nombre del socio.');
+
+    if (partner.kind === 'original') {
+      const initial = Number(partner.initialOwnershipPercentage);
+      if (!Number.isFinite(initial) || initial <= 0 || initial > 100) {
+        throw new Error(
+          'La participación inicial del socio original debe ser mayor a 0 y hasta 100%.',
+        );
+      }
+    } else {
+      const target = Number(partner.targetPercentage);
+      const required = Number(partner.requiredContribution);
+
+      if (!Number.isFinite(target) || target <= 0 || target > 100) {
+        throw new Error(
+          'El porcentaje objetivo debe ser mayor a 0 y hasta 100%.',
+        );
+      }
+      if (!Number.isFinite(required) || required <= 0) {
+        throw new Error(
+          'Indicá el aporte total acordado que debe integrar el nuevo socio.',
+        );
+      }
+
+      const allPartnersSnap = await getDocs(
+        collection(db, COLLECTIONS.SOCIETY_PARTNERS),
+      );
+      const otherIncomingTarget = allPartnersSnap.docs.reduce(
+        (sum, partnerDoc) => {
+          if (partnerDoc.id === partner.id) return sum;
+          const item = partnerDoc.data() as SocietyPartner;
+          if (item.kind !== 'incoming' || item.active === false) return sum;
+          return sum + Number(item.targetPercentage || 0);
+        },
+        0,
+      );
+
+      if (otherIncomingTarget + target > 100.0001) {
+        throw new Error(
+          'La suma de los porcentajes objetivo de los socios entrantes no puede superar el 100%.',
+        );
+      }
+    }
+
+    const ref = doc(db, COLLECTIONS.SOCIETY_PARTNERS, partner.id);
+    const existingSnap = await getDoc(ref);
+    const previous = existingSnap.exists()
+      ? ({ ...(existingSnap.data() as SocietyPartner), id: existingSnap.id })
+      : null;
+
+    if (previous) {
+      const contributionsSnap = await getDocs(
+        query(
+          collection(db, COLLECTIONS.SOCIETY_CONTRIBUTIONS),
+          where('partnerId', '==', partner.id),
+        ),
+      );
+
+      const hasActiveContributions = contributionsSnap.docs.some(
+        (item) => !(item.data() as SocietyContribution).voided,
+      );
+
+      if (hasActiveContributions) {
+        const previousEconomic = JSON.stringify({
+          kind: previous.kind,
+          initialOwnershipPercentage:
+            Number(previous.initialOwnershipPercentage || 0),
+          targetPercentage: Number(previous.targetPercentage || 0),
+          requiredContribution: Number(previous.requiredContribution || 0),
+          installmentPlan: (previous.installmentPlan || []).map((item) => ({
+            number: Number(item.number || 0),
+            dueDate: Number(item.dueDate || 0),
+            amount: Number(item.amount || 0),
+          })),
+        });
+        const nextEconomic = JSON.stringify({
+          kind: partner.kind,
+          initialOwnershipPercentage:
+            Number(partner.initialOwnershipPercentage || 0),
+          targetPercentage: Number(partner.targetPercentage || 0),
+          requiredContribution: Number(partner.requiredContribution || 0),
+          installmentPlan: (partner.installmentPlan || []).map((item) => ({
+            number: Number(item.number || 0),
+            dueDate: Number(item.dueDate || 0),
+            amount: Number(item.amount || 0),
+          })),
+        });
+
+        if (previousEconomic !== nextEconomic) {
+          throw new Error(
+            'Este socio ya tiene aportes registrados. Para preservar la historia no se pueden cambiar sus condiciones económicas; solo nombre, notas o estado.',
+          );
+        }
+      }
+    }
+
+    const now = Date.now();
+
+    await setDoc(
+      ref,
+      cleanData({
+        ...partner,
+        id: partner.id,
+        name: cleanName,
+        active: partner.active !== false,
+        createdAt: previous?.createdAt || partner.createdAt || now,
+        createdByUserId:
+          previous?.createdByUserId || partner.createdByUserId || admin.id,
+        createdByUserName:
+          previous?.createdByUserName || partner.createdByUserName || admin.name,
+        updatedAt: now,
+        updatedByUserId: admin.id,
+        updatedByUserName: admin.name,
+      }),
+      { merge: true },
+    );
+  },
+
+  deleteSocietyPartner: async (
+    partnerId: string,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
+
+    const contributionsSnap = await getDocs(
+      query(
+        collection(db, COLLECTIONS.SOCIETY_CONTRIBUTIONS),
+        where('partnerId', '==', partnerId),
+        limit(1),
+      ),
+    );
+
+    if (!contributionsSnap.empty) {
+      throw new Error(
+        'No se puede eliminar un socio con aportes registrados. Podés dejarlo inactivo o conservarlo como parte del historial.',
+      );
+    }
+
+    await deleteDoc(doc(db, COLLECTIONS.SOCIETY_PARTNERS, partnerId));
+  },
+
+  getSocietyContributions: async (
+    requestingUserId: string,
+  ): Promise<SocietyContribution[]> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(requestingUserId);
+
+    const snap = await getDocs(
+      collection(db, COLLECTIONS.SOCIETY_CONTRIBUTIONS),
+    );
+
+    return mapDocs<SocietyContribution>(snap).sort(
+      (a, b) => Number(b.date || 0) - Number(a.date || 0),
+    );
+  },
+
+  saveSocietyContribution: async (
+    contribution: SocietyContribution,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const admin = await assertAdminUser(requestingUserId);
+
+    const valuationSnap = await getDoc(
+      doc(db, COLLECTIONS.SOCIETY_CONFIG, 'main'),
+    );
+
+    if (
+      !valuationSnap.exists() ||
+      (valuationSnap.data() as SocietyValuation).status !== 'locked'
+    ) {
+      throw new Error(
+        'La valuación inicial debe estar cerrada antes de registrar aportes societarios.',
+      );
+    }
+
+    const partnerSnap = await getDoc(
+      doc(db, COLLECTIONS.SOCIETY_PARTNERS, contribution.partnerId),
+    );
+
+    if (!partnerSnap.exists()) {
+      throw new Error('No se encontró el socio seleccionado.');
+    }
+
+    const partner = {
+      ...(partnerSnap.data() as SocietyPartner),
+      id: partnerSnap.id,
+    };
+
+    if (partner.kind !== 'incoming') {
+      throw new Error(
+        'Los aportes de integración se registran para socios entrantes.',
+      );
+    }
+
+    const amount = Number(contribution.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('El importe del aporte debe ser mayor que cero.');
+    }
+
+    const contributionDate = Number(contribution.date || 0);
+    if (!Number.isFinite(contributionDate) || contributionDate <= 0) {
+      throw new Error('La fecha del aporte es inválida.');
+    }
+
+    const nowDate = new Date();
+    const endOfToday = new Date(
+      nowDate.getFullYear(),
+      nowDate.getMonth(),
+      nowDate.getDate(),
+      23,
+      59,
+      59,
+      999,
+    ).getTime();
+
+    if (contributionDate > endOfToday) {
+      throw new Error(
+        'No se puede registrar como pagado un aporte con fecha futura.',
+      );
+    }
+
+    const required = Number(partner.requiredContribution || 0);
+    if (!Number.isFinite(required) || required <= 0) {
+      throw new Error(
+        'El socio no tiene definido un aporte total acordado.',
+      );
+    }
+
+    const previousSnap = await getDocs(
+      query(
+        collection(db, COLLECTIONS.SOCIETY_CONTRIBUTIONS),
+        where('partnerId', '==', partner.id),
+      ),
+    );
+
+    const alreadyPaid = previousSnap.docs.reduce((sum, item) => {
+      const data = item.data() as SocietyContribution;
+      if (data.voided) return sum;
+      if (item.id === contribution.id) return sum;
+      return sum + Number(data.amount || 0);
+    }, 0);
+
+    if (alreadyPaid + amount > required + 0.01) {
+      throw new Error(
+        `El aporte supera el saldo pendiente. Restan $${Math.max(
+          0,
+          required - alreadyPaid,
+        ).toLocaleString('es-AR')}.`,
+      );
+    }
+
+    const now = Date.now();
+
+    await setDoc(
+      doc(db, COLLECTIONS.SOCIETY_CONTRIBUTIONS, contribution.id),
+      cleanData({
+        ...contribution,
+        id: contribution.id,
+        partnerName: partner.name,
+        amount,
+        recordedAt: contribution.recordedAt || now,
+        recordedByUserId: admin.id,
+        recordedByUserName: admin.name,
+        voided: false,
+      }),
+      { merge: false },
+    );
+  },
+
+  voidSocietyContribution: async (
+    contributionId: string,
+    reason: string,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const admin = await assertAdminUser(requestingUserId);
+    const cleanReason = String(reason || '').trim();
+
+    if (!cleanReason) {
+      throw new Error('Indicá el motivo de la anulación.');
+    }
+
+    const ref = doc(
+      db,
+      COLLECTIONS.SOCIETY_CONTRIBUTIONS,
+      contributionId,
+    );
+
+    const snap = await getDoc(ref);
+    if (!snap.exists()) throw new Error('No se encontró el aporte.');
+
+    const data = snap.data() as SocietyContribution;
+    if (data.voided) return;
+
+    await updateDoc(ref, {
+      voided: true,
+      voidedAt: Date.now(),
+      voidedByUserId: admin.id,
+      voidedByUserName: admin.name,
+      voidReason: cleanReason,
+    });
   },
 
   // ================= EXPORT =================
