@@ -7,6 +7,7 @@ import SalesHistory from './components/SalesHistory';
 import AIAdvisor from './components/AIAdvisor';
 import TeamCommissions from './components/TeamCommissions';
 import UserManagement from './components/UserManagement';
+import SocietyManagement from './components/SocietyManagement';
 import Login from './components/Login';
 import ProfileModal from './components/ProfileModal';
 import { StorageService } from './services/storageService';
@@ -539,6 +540,21 @@ const App: React.FC = () => {
 
       case 'team':
         return <TeamCommissions sales={sales} currentUser={currentUser} onUpdate={refreshData} />;
+
+      case 'society':
+        return currentUser.role === 'admin' ? (
+          <SocietyManagement
+            products={Array.isArray(products) ? products : []}
+            currentUser={currentUser}
+          />
+        ) : (
+          <Dashboard
+            products={products}
+            sales={sales}
+            onNavigate={setCurrentView}
+            currentUser={currentUser}
+          />
+        );
 
       case 'users':
         return currentUser.role === 'admin' ? (
