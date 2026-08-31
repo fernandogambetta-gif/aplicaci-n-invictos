@@ -2,11 +2,13 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Product,
   Sale,
+  SaleAdjustment,
   SaleAdjustmentLine,
   User,
   PaymentMethod,
 } from '../types';
 import { StorageService } from '../services/storageService';
+import SaleAdjustmentReceiptModal from './SaleAdjustmentReceiptModal';
 import {
   ArrowLeftRight,
   PackagePlus,
@@ -132,6 +134,7 @@ const SaleAdjustmentModal: React.FC<SaleAdjustmentModalProps> = ({
 
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [savedAdjustment, setSavedAdjustment] = useState<SaleAdjustment | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,7 +252,7 @@ const SaleAdjustmentModal: React.FC<SaleAdjustmentModalProps> = ({
     setSaving(true);
 
     try {
-      await StorageService.registerSaleAdjustment(sale.id, {
+      const adjustment = await StorageService.registerSaleAdjustment(sale.id, {
         sourceLineId: sourceLine.lineId,
         quantity,
         returnToStock,
@@ -271,7 +274,7 @@ const SaleAdjustmentModal: React.FC<SaleAdjustmentModalProps> = ({
       });
 
       await Promise.resolve(onSaved());
-      onClose();
+      setSavedAdjustment(adjustment);
     } catch (e: any) {
       console.error(e);
       setError(e?.message || 'No se pudo registrar el cambio/devolución.');
@@ -279,6 +282,16 @@ const SaleAdjustmentModal: React.FC<SaleAdjustmentModalProps> = ({
       setSaving(false);
     }
   };
+
+  if (savedAdjustment) {
+    return (
+      <SaleAdjustmentReceiptModal
+        sale={sale}
+        adjustment={savedAdjustment}
+        onClose={onClose}
+      />
+    );
+  }
 
   if (!effectiveLines.length) {
     return (
@@ -562,7 +575,7 @@ const SaleAdjustmentModal: React.FC<SaleAdjustmentModalProps> = ({
                   ? 'Sin diferencia'
                   : difference > 0
                     ? 'Diferencia a cobrar'
-                    : 'Devolución / saldo a favor'}
+                    : 'Devolución al cliente'}
               </span>
               <span
                 className={`text-2xl font-black ${
