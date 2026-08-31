@@ -2098,7 +2098,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                         {adjustment.returnedItem.quantity} × {adjustment.returnedItem.productName}
                       </div>
                       <div className="text-[11px] text-slate-500">
-                        Reconocido: ${money(adjustment.returnedItem.totalAmount)} · {adjustment.returnedItem.returnToStock ? 'volvió al stock' : 'no volvió al stock'}
+                        Reconocido: ${money(adjustment.returnedItem.totalAmount)} · {
+                          adjustment.returnedProductCreatedInInventory
+                            ? 'se reincorporó como producto nuevo'
+                            : adjustment.returnedItem.returnToStock
+                              ? 'volvió al stock'
+                              : 'no volvió al stock'
+                        }
+                        {adjustment.returnedProductWasMissing ? ' · no existía en inventario' : ''}
                       </div>
                     </Td>
                     <Td>
