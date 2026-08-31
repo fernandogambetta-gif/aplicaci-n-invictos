@@ -2002,7 +2002,18 @@ export const StorageService = {
    * Solo registra el movimiento actual, actualiza stock y deja trazabilidad.
    */
   registerLegacySaleAdjustment: async (input: {
-    returnedProductId: string;
+    returnedProductSource?: 'inventory' | 'manual';
+    returnedProductId?: string;
+    manualReturnedProduct?: {
+      name: string;
+      referenceCode?: string;
+      size?: string;
+      color?: string;
+      category?: string;
+      provider?: string;
+      resalePrice?: number;
+      cost?: number;
+    };
     quantity: number;
     originalUnitAmount: number;
     returnToStock: boolean;
@@ -2019,12 +2030,9 @@ export const StorageService = {
   }): Promise<LegacySaleAdjustment> => {
     if (!db) throw new Error('Firestore no inicializado');
 
+    const source = input.returnedProductSource || 'inventory';
     const quantity = Math.floor(Number(input.quantity));
     const originalUnitAmount = Math.max(0, Number(input.originalUnitAmount));
-
-    if (!input.returnedProductId) {
-      throw new Error('Seleccioná el producto que devuelve el cliente.');
-    }
 
     if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new Error('La cantidad devuelta debe ser mayor que cero.');
@@ -2032,6 +2040,30 @@ export const StorageService = {
 
     if (!Number.isFinite(originalUnitAmount) || originalUnitAmount <= 0) {
       throw new Error('Ingresá cuánto pagó originalmente el cliente por cada unidad.');
+    }
+
+    if (source === 'inventory' && !input.returnedProductId) {
+      throw new Error('Seleccioná el producto que devuelve el cliente.');
+    }
+
+    const manualName = String(input.manualReturnedProduct?.name || '').trim();
+    if (source === 'manual' && !manualName) {
+      throw new Error('Ingresá una descripción del producto que devuelve el cliente.');
+    }
+
+    const manualResalePrice = Math.max(
+      0,
+      Number(input.manualReturnedProduct?.resalePrice || 0),
+    );
+    const manualCost = Math.max(
+      0,
+      Number(input.manualReturnedProduct?.cost || 0),
+    );
+
+    if (source === 'manual' && input.returnToStock && manualResalePrice <= 0) {
+      throw new Error(
+        'Para reincorporar el producto al inventario, indicá su precio actual de venta.',
+      );
     }
 
     const replacementQuantity = input.replacementProductId
@@ -2048,6 +2080,15 @@ export const StorageService = {
     const adjustmentRef = doc(
       collection(db, COLLECTIONS.LEGACY_SALE_ADJUSTMENTS),
     );
+
+    // Si el artículo vendido antes de INVICTOS ya no existe y vuelve en buen
+    // estado, se crea un producto nuevo para que el stock recuperado quede
+    // realmente disponible y trazable.
+    const recreatedReturnedProductRef =
+      source === 'manual' && input.returnToStock
+        ? doc(collection(db, COLLECTIONS.PRODUCTS))
+        : null;
+
     const returnMovementRef = input.returnToStock
       ? doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS))
       : null;
@@ -2056,18 +2097,22 @@ export const StorageService = {
       : null;
 
     return runTransaction(db, async (transaction) => {
-      const returnedRef = doc(
-        db,
-        COLLECTIONS.PRODUCTS,
-        input.returnedProductId,
-      );
-      const returnedSnap = await transaction.get(returnedRef);
+      let returnedSnap: any = null;
+      let returnedRef: any = null;
+      let returnedProduct: Product | null = null;
 
-      if (!returnedSnap.exists()) {
-        throw new Error('El producto devuelto ya no existe en el inventario.');
+      if (source === 'inventory') {
+        returnedRef = doc(db, COLLECTIONS.PRODUCTS, input.returnedProductId!);
+        returnedSnap = await transaction.get(returnedRef);
+
+        if (!returnedSnap.exists()) {
+          throw new Error(
+            'El producto seleccionado ya no existe. Elegí “El producto ya no está en inventario” y cargalo manualmente.',
+          );
+        }
+
+        returnedProduct = returnedSnap.data() as Product;
       }
-
-      const returnedProduct = returnedSnap.data() as Product;
 
       let replacementSnap: any = null;
       let replacementRef: any = null;
@@ -2079,17 +2124,19 @@ export const StorageService = {
           input.replacementProductId,
         );
 
-        // Firestore exige completar las lecturas antes de comenzar escrituras.
+        // Todas las lecturas de Firestore ocurren antes de cualquier escritura.
         replacementSnap =
+          source === 'inventory' &&
           input.replacementProductId === input.returnedProductId
             ? returnedSnap
             : await transaction.get(replacementRef);
 
-        if (!replacementSnap.exists()) {
+        if (!replacementSnap?.exists()) {
           throw new Error('El producto de reemplazo ya no existe.');
         }
       }
 
+      const now = input.timestamp || Date.now();
       const stockDeltas = new Map<string, number>();
       const addDelta = (productId: string, delta: number) => {
         stockDeltas.set(
@@ -2098,12 +2145,12 @@ export const StorageService = {
         );
       };
 
-      if (input.returnToStock) {
+      // Para un producto ya existente, el reingreso se aplica al stock actual.
+      if (source === 'inventory' && input.returnToStock && input.returnedProductId) {
         addDelta(input.returnedProductId, quantity);
       }
 
       let replacementItem: SaleAdjustmentLine | undefined;
-
       if (replacementSnap && input.replacementProductId) {
         const replacementProduct = replacementSnap.data() as Product;
         addDelta(input.replacementProductId, -replacementQuantity);
@@ -2126,11 +2173,10 @@ export const StorageService = {
         };
       }
 
-      // Validar stock final, teniendo en cuenta que el mismo producto puede
-      // volver y volver a salir dentro de la misma operación.
+      // Validar el stock final de productos que ya existían.
       for (const [productId, delta] of Array.from(stockDeltas.entries())) {
         const snap =
-          productId === input.returnedProductId
+          source === 'inventory' && productId === input.returnedProductId
             ? returnedSnap
             : replacementSnap;
         const product = snap.data() as Product;
@@ -2157,11 +2203,36 @@ export const StorageService = {
         );
       }
 
-      const now = input.timestamp || Date.now();
-      const returnedCurrentCost = Math.max(
-        0,
-        Number(returnedProduct.cost || 0),
-      );
+      let returnedProductId: string;
+      let returnedProductName: string;
+      let returnedProductCode: string | undefined;
+      let returnedShortCode: string | undefined;
+      let returnedBarcode: string | undefined;
+      let returnedSize: string | undefined;
+      let returnedColor: string | undefined;
+      let returnedCurrentCost = 0;
+
+      if (source === 'inventory' && returnedSnap && returnedProduct) {
+        returnedProductId = returnedSnap.id;
+        returnedProductName = returnedProduct.name || 'Producto';
+        returnedProductCode = returnedProduct.code;
+        returnedShortCode = returnedProduct.shortCode;
+        returnedBarcode = returnedProduct.barcode;
+        returnedSize = returnedProduct.size;
+        returnedColor = returnedProduct.color;
+        returnedCurrentCost = Math.max(0, Number(returnedProduct.cost || 0));
+      } else {
+        returnedProductId = recreatedReturnedProductRef
+          ? recreatedReturnedProductRef.id
+          : `legacy-manual:${adjustmentRef.id}`;
+        returnedProductName = manualName;
+        returnedProductCode = recreatedReturnedProductRef
+          ? `LEG-${recreatedReturnedProductRef.id.slice(0, 8).toUpperCase()}`
+          : String(input.manualReturnedProduct?.referenceCode || '').trim() || undefined;
+        returnedSize = String(input.manualReturnedProduct?.size || '').trim() || undefined;
+        returnedColor = String(input.manualReturnedProduct?.color || '').trim() || undefined;
+        returnedCurrentCost = manualCost;
+      }
 
       const adjustment: LegacySaleAdjustment = {
         id: adjustmentRef.id,
@@ -2172,17 +2243,18 @@ export const StorageService = {
         returnedItem: {
           lineId: `${adjustmentRef.id}-returned`,
           sourceLineId: `legacy-${adjustmentRef.id}`,
-          productId: returnedSnap.id,
-          productName: returnedProduct.name || 'Producto',
-          productCode: returnedProduct.code,
-          shortCode: returnedProduct.shortCode,
-          barcode: returnedProduct.barcode,
-          size: returnedProduct.size,
-          color: returnedProduct.color,
+          productId: returnedProductId,
+          productName: returnedProductName,
+          productCode: returnedProductCode,
+          shortCode: returnedShortCode,
+          barcode: returnedBarcode,
+          size: returnedSize,
+          color: returnedColor,
           quantity,
           unitAmount: originalUnitAmount,
           totalAmount: returnedTotal,
-          // Es una estimación con el costo actual; no se inventa un costo histórico.
+          // En una venta anterior no se inventa el costo histórico. Para un
+          // artículo manual se usa solamente el costo actual/estimado informado.
           costAtSale: returnedCurrentCost,
           returnToStock: Boolean(input.returnToStock),
         },
@@ -2206,49 +2278,114 @@ export const StorageService = {
         notes: input.notes?.trim() || undefined,
         recordedByUserId: input.userId,
         recordedByUserName: input.userName,
+        returnedProductWasMissing: source === 'manual',
+        returnedProductCreatedInInventory:
+          source === 'manual' && Boolean(recreatedReturnedProductRef),
+        returnedProductOriginalReference:
+          source === 'manual'
+            ? String(input.manualReturnedProduct?.referenceCode || '').trim() || undefined
+            : undefined,
         commissionAdjustment: 0,
       };
 
-      // Trazabilidad de stock del producto que vuelve.
-      let returnedRunningStock = getNumericStock(returnedProduct.stock);
-
-      if (returnMovementRef && input.returnToStock) {
-        const previousStock = returnedRunningStock;
-        const newStock = previousStock + quantity;
-        returnedRunningStock = newStock;
+      // Si el producto ya no existía y se decidió que vuelve al stock,
+      // reincorporarlo como un producto nuevo. No se inventan categoría ni
+      // proveedor específicos: se usan etiquetas explícitas si no se conocen.
+      if (recreatedReturnedProductRef) {
+        const recreatedProduct: Product = {
+          id: recreatedReturnedProductRef.id,
+          code: returnedProductCode || `LEG-${recreatedReturnedProductRef.id.slice(0, 8).toUpperCase()}`,
+          name: manualName,
+          category:
+            String(input.manualReturnedProduct?.category || '').trim() ||
+            'Sin categoría',
+          provider:
+            String(input.manualReturnedProduct?.provider || '').trim() ||
+            'Sin proveedor',
+          price: manualResalePrice,
+          cost: manualCost,
+          stock: quantity,
+          size: returnedSize,
+          color: returnedColor,
+          description:
+            'Producto reincorporado por cambio/devolución de una venta anterior a INVICTOS.',
+          minStock: 0,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        };
 
         transaction.set(
-          returnMovementRef,
-          cleanData({
-            id: returnMovementRef.id,
-            productId: returnedSnap.id,
-            productName: returnedProduct.name || 'Producto',
-            productCode: returnedProduct.code || '',
-            barcode: returnedProduct.barcode,
-            size: returnedProduct.size,
-            color: returnedProduct.color,
-            type: 'RETURN',
-            quantityChange: quantity,
-            previousStock,
-            newStock,
-            timestamp: now,
-            userId: input.userId,
-            userName: input.userName,
-            referenceId: `legacy:${adjustmentRef.id}`,
-            note:
-              adjustment.type === 'exchange'
-                ? 'Reingreso por cambio de una venta anterior a INVICTOS.'
-                : 'Reingreso por devolución de una venta anterior a INVICTOS.',
-            unitCost: returnedCurrentCost,
-          }),
+          recreatedReturnedProductRef,
+          cleanData(recreatedProduct),
         );
       }
 
+      // Trazabilidad del producto que vuelve.
+      if (returnMovementRef && input.returnToStock) {
+        if (source === 'inventory' && returnedSnap && returnedProduct) {
+          const previousStock = getNumericStock(returnedProduct.stock);
+          const newStock = previousStock + quantity;
+
+          transaction.set(
+            returnMovementRef,
+            cleanData({
+              id: returnMovementRef.id,
+              productId: returnedSnap.id,
+              productName: returnedProduct.name || 'Producto',
+              productCode: returnedProduct.code || '',
+              barcode: returnedProduct.barcode,
+              size: returnedProduct.size,
+              color: returnedProduct.color,
+              type: 'RETURN',
+              quantityChange: quantity,
+              previousStock,
+              newStock,
+              timestamp: now,
+              userId: input.userId,
+              userName: input.userName,
+              referenceId: `legacy:${adjustmentRef.id}`,
+              note:
+                adjustment.type === 'exchange'
+                  ? 'Reingreso por cambio de una venta anterior a INVICTOS.'
+                  : 'Reingreso por devolución de una venta anterior a INVICTOS.',
+              unitCost: returnedCurrentCost,
+            }),
+          );
+        } else if (recreatedReturnedProductRef) {
+          transaction.set(
+            returnMovementRef,
+            cleanData({
+              id: returnMovementRef.id,
+              productId: recreatedReturnedProductRef.id,
+              productName: manualName,
+              productCode: returnedProductCode || '',
+              size: returnedSize,
+              color: returnedColor,
+              type: 'RETURN',
+              quantityChange: quantity,
+              previousStock: 0,
+              newStock: quantity,
+              timestamp: now,
+              userId: input.userId,
+              userName: input.userName,
+              referenceId: `legacy:${adjustmentRef.id}`,
+              note:
+                'Reincorporación al inventario de un producto que ya no estaba registrado. Venta anterior a INVICTOS.',
+              unitCost: manualCost,
+            }),
+          );
+        }
+      }
+
+      // Salida del producto entregado por el cambio.
       if (replacementMovementRef && replacementItem && replacementSnap) {
         const replacementProduct = replacementSnap.data() as Product;
-        const isSameProduct = replacementItem.productId === returnedSnap.id;
-        const previousStock = isSameProduct
-          ? returnedRunningStock
+        const sameExistingReturned =
+          source === 'inventory' && replacementItem.productId === returnedSnap?.id;
+        const previousStock = sameExistingReturned
+          ? getNumericStock(replacementProduct.stock) +
+            (input.returnToStock ? quantity : 0)
           : getNumericStock(replacementProduct.stock);
         const newStock = previousStock - replacementQuantity;
 
@@ -2258,7 +2395,8 @@ export const StorageService = {
             id: replacementMovementRef.id,
             productId: replacementItem.productId,
             productName: replacementItem.productName,
-            productCode: replacementItem.productCode || replacementProduct.code || '',
+            productCode:
+              replacementItem.productCode || replacementProduct.code || '',
             barcode: replacementItem.barcode || replacementProduct.barcode,
             size: replacementItem.size || replacementProduct.size,
             color: replacementItem.color || replacementProduct.color,
@@ -2270,16 +2408,17 @@ export const StorageService = {
             userId: input.userId,
             userName: input.userName,
             referenceId: `legacy:${adjustmentRef.id}`,
-            note: 'Producto entregado por cambio de una venta anterior a INVICTOS.',
+            note:
+              'Producto entregado por cambio de una venta anterior a INVICTOS.',
             unitCost: replacementItem.costAtSale,
           }),
         );
       }
 
-      // Aplicar stock final de forma neta por producto.
+      // Aplicar stock final neto solamente a documentos que ya existían.
       for (const [productId, delta] of Array.from(stockDeltas.entries())) {
         const snap =
-          productId === input.returnedProductId
+          source === 'inventory' && productId === input.returnedProductId
             ? returnedSnap
             : replacementSnap;
         const product = snap.data() as Product;
