@@ -183,10 +183,22 @@ const LegacySaleAdjustmentReceiptModal: React.FC<LegacySaleAdjustmentReceiptModa
       );
       addText(
         adjustment.returnedItem.returnToStock
-          ? 'Destino: vuelve al stock disponible.'
+          ? adjustment.returnedProductCreatedInInventory
+            ? 'Destino: reincorporado al inventario como producto nuevo.'
+            : 'Destino: vuelve al stock disponible.'
           : 'Destino: no vuelve al stock disponible.',
         9,
       );
+      if (adjustment.returnedProductWasMissing) {
+        addText(
+          `Producto no existente en el inventario al momento del cambio${
+            adjustment.returnedProductOriginalReference
+              ? ` · Referencia anterior: ${adjustment.returnedProductOriginalReference}`
+              : ''
+          }.`,
+          9,
+        );
+      }
 
       if (adjustment.replacementItem) {
         y += 2;
@@ -327,8 +339,15 @@ const LegacySaleAdjustmentReceiptModal: React.FC<LegacySaleAdjustmentReceiptModa
               <div className="mt-1">Importe original reconocido: ${money(adjustment.returnedItem.totalAmount)}</div>
               <div className="mt-1 text-xs text-slate-500">
                 {adjustment.returnedItem.returnToStock
-                  ? 'Reingresó al stock disponible.'
-                  : 'No reingresó al stock disponible.'}
+                  ? adjustment.returnedProductCreatedInInventory
+                    ? 'No existía en el inventario y fue reincorporado como producto nuevo.'
+                    : 'Reingresó al stock disponible.'
+                  : adjustment.returnedProductWasMissing
+                    ? 'No existía en el inventario y no fue reincorporado.'
+                    : 'No reingresó al stock disponible.'}
+                {adjustment.returnedProductOriginalReference
+                  ? ` · Ref. anterior: ${adjustment.returnedProductOriginalReference}`
+                  : ''}
               </div>
             </div>
           </section>
