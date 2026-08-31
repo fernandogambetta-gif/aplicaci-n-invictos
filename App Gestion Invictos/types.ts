@@ -239,6 +239,35 @@ export interface SaleAdjustment {
   commissionWasAlreadyPaid?: boolean;
 }
 
+// Cambio/devolución correspondiente a una venta realizada antes de usar INVICTOS.
+// No crea una venta histórica ficticia ni genera comisión retroactiva.
+export interface LegacySaleAdjustment {
+  id: string;
+  type: SaleAdjustmentType;
+  timestamp: number;
+
+  // Fecha aproximada de la venta original, si se conoce.
+  originalSaleDate?: number;
+  customerName?: string;
+
+  returnedItem: SaleReturnedLine;
+  replacementItem?: SaleAdjustmentLine;
+
+  // Importe originalmente pagado por la mercadería devuelta.
+  originalPaidAmount: number;
+
+  // Positivo: diferencia cobrada ahora. Negativo: importe devuelto ahora.
+  difference: number;
+  settlement: SaleAdjustmentSettlement;
+
+  notes?: string;
+  recordedByUserId: string;
+  recordedByUserName: string;
+
+  // Se deja explícito para informes: estas operaciones no generan comisión histórica.
+  commissionAdjustment: 0;
+}
+
 export interface Sale {
   id: string;
   items: SaleItem[];
