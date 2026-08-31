@@ -264,6 +264,13 @@ export interface LegacySaleAdjustment {
   recordedByUserId: string;
   recordedByUserName: string;
 
+  // Identifica si el artículo devuelto todavía existía en el inventario
+  // cuando se registró esta operación. Los campos son opcionales para
+  // mantener compatibilidad con movimientos ya guardados.
+  returnedProductWasMissing?: boolean;
+  returnedProductCreatedInInventory?: boolean;
+  returnedProductOriginalReference?: string;
+
   // Se deja explícito para informes: estas operaciones no generan comisión histórica.
   commissionAdjustment: 0;
 }
