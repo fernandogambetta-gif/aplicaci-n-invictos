@@ -11,6 +11,7 @@ import {
   ReceivablePayment,
   SaleAdjustment,
   SaleAdjustmentLine,
+  LegacySaleAdjustment,
   SocietyValuation,
   SocietyAsset,
   SocietyPartner,
@@ -58,6 +59,7 @@ const cleanData = (data: any): any => {
 const COLLECTIONS = {
   PRODUCTS: 'products',
   SALES: 'sales',
+  LEGACY_SALE_ADJUSTMENTS: 'legacySaleAdjustments',
   USERS: 'users',
   CONFIG: 'config',
   CATEGORIES: 'categories',
@@ -1978,6 +1980,321 @@ export const StorageService = {
     });
 
     return result;
+  },
+
+  // ================= CAMBIOS / DEVOLUCIONES DE VENTAS PREVIAS =================
+  getLegacySaleAdjustments: async (): Promise<LegacySaleAdjustment[]> => {
+    if (!db) return [];
+
+    const snap = await getDocs(
+      collection(db, COLLECTIONS.LEGACY_SALE_ADJUSTMENTS),
+    );
+
+    return mapDocs<LegacySaleAdjustment>(snap).sort(
+      (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0),
+    );
+  },
+
+  /**
+   * CAMBIO / DEVOLUCIÓN DE VENTA ANTERIOR A INVICTOS
+   *
+   * No crea una venta histórica ficticia y no modifica comisiones.
+   * Solo registra el movimiento actual, actualiza stock y deja trazabilidad.
+   */
+  registerLegacySaleAdjustment: async (input: {
+    returnedProductId: string;
+    quantity: number;
+    originalUnitAmount: number;
+    returnToStock: boolean;
+    replacementProductId?: string;
+    replacementQuantity?: number;
+    settlementMethod?: Exclude<PaymentMethod, 'account'>;
+    receiptNumber?: string;
+    customerName?: string;
+    originalSaleDate?: number;
+    notes?: string;
+    userId: string;
+    userName: string;
+    timestamp?: number;
+  }): Promise<LegacySaleAdjustment> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const quantity = Math.floor(Number(input.quantity));
+    const originalUnitAmount = Math.max(0, Number(input.originalUnitAmount));
+
+    if (!input.returnedProductId) {
+      throw new Error('Seleccioná el producto que devuelve el cliente.');
+    }
+
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new Error('La cantidad devuelta debe ser mayor que cero.');
+    }
+
+    if (!Number.isFinite(originalUnitAmount) || originalUnitAmount <= 0) {
+      throw new Error('Ingresá cuánto pagó originalmente el cliente por cada unidad.');
+    }
+
+    const replacementQuantity = input.replacementProductId
+      ? Math.floor(Number(input.replacementQuantity || 1))
+      : 0;
+
+    if (
+      input.replacementProductId &&
+      (!Number.isFinite(replacementQuantity) || replacementQuantity <= 0)
+    ) {
+      throw new Error('La cantidad del producto nuevo debe ser mayor que cero.');
+    }
+
+    const adjustmentRef = doc(
+      collection(db, COLLECTIONS.LEGACY_SALE_ADJUSTMENTS),
+    );
+    const returnMovementRef = input.returnToStock
+      ? doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS))
+      : null;
+    const replacementMovementRef = input.replacementProductId
+      ? doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS))
+      : null;
+
+    return runTransaction(db, async (transaction) => {
+      const returnedRef = doc(
+        db,
+        COLLECTIONS.PRODUCTS,
+        input.returnedProductId,
+      );
+      const returnedSnap = await transaction.get(returnedRef);
+
+      if (!returnedSnap.exists()) {
+        throw new Error('El producto devuelto ya no existe en el inventario.');
+      }
+
+      const returnedProduct = returnedSnap.data() as Product;
+
+      let replacementSnap: any = null;
+      let replacementRef: any = null;
+
+      if (input.replacementProductId) {
+        replacementRef = doc(
+          db,
+          COLLECTIONS.PRODUCTS,
+          input.replacementProductId,
+        );
+
+        // Firestore exige completar las lecturas antes de comenzar escrituras.
+        replacementSnap =
+          input.replacementProductId === input.returnedProductId
+            ? returnedSnap
+            : await transaction.get(replacementRef);
+
+        if (!replacementSnap.exists()) {
+          throw new Error('El producto de reemplazo ya no existe.');
+        }
+      }
+
+      const stockDeltas = new Map<string, number>();
+      const addDelta = (productId: string, delta: number) => {
+        stockDeltas.set(
+          productId,
+          Number(stockDeltas.get(productId) || 0) + delta,
+        );
+      };
+
+      if (input.returnToStock) {
+        addDelta(input.returnedProductId, quantity);
+      }
+
+      let replacementItem: SaleAdjustmentLine | undefined;
+
+      if (replacementSnap && input.replacementProductId) {
+        const replacementProduct = replacementSnap.data() as Product;
+        addDelta(input.replacementProductId, -replacementQuantity);
+
+        replacementItem = {
+          lineId: `${adjustmentRef.id}-new`,
+          productId: replacementSnap.id,
+          productName: replacementProduct.name || 'Producto',
+          productCode: replacementProduct.code,
+          shortCode: replacementProduct.shortCode,
+          barcode: replacementProduct.barcode,
+          size: replacementProduct.size,
+          color: replacementProduct.color,
+          quantity: replacementQuantity,
+          unitAmount: Math.max(0, Number(replacementProduct.price || 0)),
+          totalAmount:
+            Math.max(0, Number(replacementProduct.price || 0)) *
+            replacementQuantity,
+          costAtSale: Math.max(0, Number(replacementProduct.cost || 0)),
+        };
+      }
+
+      // Validar stock final, teniendo en cuenta que el mismo producto puede
+      // volver y volver a salir dentro de la misma operación.
+      for (const [productId, delta] of Array.from(stockDeltas.entries())) {
+        const snap =
+          productId === input.returnedProductId
+            ? returnedSnap
+            : replacementSnap;
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+
+        if (currentStock + delta < 0) {
+          throw new Error(
+            `Stock insuficiente para "${product.name}". Disponible: ${currentStock}.`,
+          );
+        }
+      }
+
+      const returnedTotal = originalUnitAmount * quantity;
+      const replacementTotal = replacementItem
+        ? Number(replacementItem.totalAmount || 0)
+        : 0;
+      const difference = replacementTotal - returnedTotal;
+
+      if (Math.abs(difference) >= 0.01 && !input.settlementMethod) {
+        throw new Error(
+          difference > 0
+            ? 'Seleccioná cómo se cobrará la diferencia.'
+            : 'Seleccioná cómo se realizará la devolución.',
+        );
+      }
+
+      const now = input.timestamp || Date.now();
+      const returnedCurrentCost = Math.max(
+        0,
+        Number(returnedProduct.cost || 0),
+      );
+
+      const adjustment: LegacySaleAdjustment = {
+        id: adjustmentRef.id,
+        type: replacementItem ? 'exchange' : 'return',
+        timestamp: now,
+        originalSaleDate: input.originalSaleDate,
+        customerName: input.customerName?.trim() || undefined,
+        returnedItem: {
+          lineId: `${adjustmentRef.id}-returned`,
+          sourceLineId: `legacy-${adjustmentRef.id}`,
+          productId: returnedSnap.id,
+          productName: returnedProduct.name || 'Producto',
+          productCode: returnedProduct.code,
+          shortCode: returnedProduct.shortCode,
+          barcode: returnedProduct.barcode,
+          size: returnedProduct.size,
+          color: returnedProduct.color,
+          quantity,
+          unitAmount: originalUnitAmount,
+          totalAmount: returnedTotal,
+          // Es una estimación con el costo actual; no se inventa un costo histórico.
+          costAtSale: returnedCurrentCost,
+          returnToStock: Boolean(input.returnToStock),
+        },
+        replacementItem,
+        originalPaidAmount: returnedTotal,
+        difference,
+        settlement: {
+          direction:
+            Math.abs(difference) < 0.01
+              ? 'none'
+              : difference > 0
+                ? 'charge'
+                : 'refund',
+          amount: Math.abs(difference),
+          method:
+            Math.abs(difference) < 0.01
+              ? undefined
+              : input.settlementMethod,
+          receiptNumber: input.receiptNumber?.trim() || undefined,
+        },
+        notes: input.notes?.trim() || undefined,
+        recordedByUserId: input.userId,
+        recordedByUserName: input.userName,
+        commissionAdjustment: 0,
+      };
+
+      // Trazabilidad de stock del producto que vuelve.
+      let returnedRunningStock = getNumericStock(returnedProduct.stock);
+
+      if (returnMovementRef && input.returnToStock) {
+        const previousStock = returnedRunningStock;
+        const newStock = previousStock + quantity;
+        returnedRunningStock = newStock;
+
+        transaction.set(
+          returnMovementRef,
+          cleanData({
+            id: returnMovementRef.id,
+            productId: returnedSnap.id,
+            productName: returnedProduct.name || 'Producto',
+            productCode: returnedProduct.code || '',
+            barcode: returnedProduct.barcode,
+            size: returnedProduct.size,
+            color: returnedProduct.color,
+            type: 'RETURN',
+            quantityChange: quantity,
+            previousStock,
+            newStock,
+            timestamp: now,
+            userId: input.userId,
+            userName: input.userName,
+            referenceId: `legacy:${adjustmentRef.id}`,
+            note:
+              adjustment.type === 'exchange'
+                ? 'Reingreso por cambio de una venta anterior a INVICTOS.'
+                : 'Reingreso por devolución de una venta anterior a INVICTOS.',
+            unitCost: returnedCurrentCost,
+          }),
+        );
+      }
+
+      if (replacementMovementRef && replacementItem && replacementSnap) {
+        const replacementProduct = replacementSnap.data() as Product;
+        const isSameProduct = replacementItem.productId === returnedSnap.id;
+        const previousStock = isSameProduct
+          ? returnedRunningStock
+          : getNumericStock(replacementProduct.stock);
+        const newStock = previousStock - replacementQuantity;
+
+        transaction.set(
+          replacementMovementRef,
+          cleanData({
+            id: replacementMovementRef.id,
+            productId: replacementItem.productId,
+            productName: replacementItem.productName,
+            productCode: replacementItem.productCode || replacementProduct.code || '',
+            barcode: replacementItem.barcode || replacementProduct.barcode,
+            size: replacementItem.size || replacementProduct.size,
+            color: replacementItem.color || replacementProduct.color,
+            type: 'EXCHANGE_OUT',
+            quantityChange: -replacementQuantity,
+            previousStock,
+            newStock,
+            timestamp: now,
+            userId: input.userId,
+            userName: input.userName,
+            referenceId: `legacy:${adjustmentRef.id}`,
+            note: 'Producto entregado por cambio de una venta anterior a INVICTOS.',
+            unitCost: replacementItem.costAtSale,
+          }),
+        );
+      }
+
+      // Aplicar stock final de forma neta por producto.
+      for (const [productId, delta] of Array.from(stockDeltas.entries())) {
+        const snap =
+          productId === input.returnedProductId
+            ? returnedSnap
+            : replacementSnap;
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+        const ref = doc(db, COLLECTIONS.PRODUCTS, productId);
+
+        transaction.update(ref, {
+          stock: currentStock + delta,
+          updatedAt: now,
+        });
+      }
+
+      transaction.set(adjustmentRef, cleanData(adjustment));
+      return adjustment;
+    });
   },
 
   markCommissionsAsPaid: async (
