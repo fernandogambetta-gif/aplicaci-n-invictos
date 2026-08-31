@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Sale,
+  SaleAdjustment,
   SaleItem,
   User,
   Product,
@@ -11,6 +12,7 @@ import {
 import { StorageService } from '../services/storageService';
 import AccountsReceivablePanel from './AccountsReceivablePanel';
 import SaleAdjustmentModal from './SaleAdjustmentModal';
+import SaleAdjustmentReceiptModal from './SaleAdjustmentReceiptModal';
 import {
   Calendar,
   DollarSign,
@@ -158,6 +160,10 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
   });
 
   const [adjustmentSale, setAdjustmentSale] = useState<Sale | null>(null);
+  const [adjustmentReceipt, setAdjustmentReceipt] = useState<{
+    sale: Sale;
+    adjustment: SaleAdjustment;
+  } | null>(null);
 
   // Búsqueda global del historial para ubicar ventas ante cambios/devoluciones.
   const [saleSearch, setSaleSearch] = useState('');
@@ -1827,9 +1833,21 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                                       ? 'Sin diferencia'
                                       : Number(adjustment.difference || 0) > 0
                                         ? `Cobrado: $${money(Math.abs(Number(adjustment.difference || 0)))}`
-                                        : `Devuelto/saldo a favor: $${money(Math.abs(Number(adjustment.difference || 0)))}`}
+                                        : `Devuelto al cliente: $${money(Math.abs(Number(adjustment.difference || 0)))}`}
                                     {' · '}Registrado por {adjustment.recordedByUserName}
                                   </div>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setAdjustmentReceipt({
+                                        sale,
+                                        adjustment,
+                                      })
+                                    }
+                                    className="mt-1.5 text-[11px] font-bold text-indigo-700 hover:text-indigo-900"
+                                  >
+                                    Ver / reimprimir comprobante
+                                  </button>
                                 </div>
                               ))}
                             </div>
@@ -2356,6 +2374,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
           onSaved={async () => {
             await Promise.resolve(onUpdate?.());
           }}
+        />
+      )}
+
+      {adjustmentReceipt && (
+        <SaleAdjustmentReceiptModal
+          sale={adjustmentReceipt.sale}
+          adjustment={adjustmentReceipt.adjustment}
+          onClose={() => setAdjustmentReceipt(null)}
         />
       )}
 
