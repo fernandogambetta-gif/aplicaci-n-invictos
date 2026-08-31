@@ -1538,6 +1538,15 @@ export const StorageService = {
       throw new Error('La cantidad del producto nuevo debe ser mayor que cero.');
     }
 
+    // Los IDs se crean fuera de la transacción para que, si Firestore la reintenta,
+    // no se generen movimientos de inventario duplicados.
+    const returnMovementRef = input.returnToStock
+      ? doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS))
+      : null;
+    const replacementMovementRef = input.replacementProductId
+      ? doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS))
+      : null;
+
     const result = await runTransaction(db, async (transaction) => {
       const saleRef = doc(db, COLLECTIONS.SALES, saleId);
       const saleSnap = await transaction.get(saleRef);
@@ -1861,7 +1870,85 @@ export const StorageService = {
         commissionWasAlreadyPaid: Boolean(sale.commissionPaid),
       };
 
-      // Aplicar stocks.
+      // Registrar trazabilidad de inventario. Se guarda cada tramo por separado
+      // para que un cambio del mismo producto deje visible primero el reingreso
+      // y luego la nueva salida, aunque el stock neto termine igual.
+      const runningStocks = new Map<string, number>();
+
+      for (const [productId, snap] of Array.from(productSnapshots.entries())) {
+        const product = snap.data() as Product;
+        runningStocks.set(productId, getNumericStock(product.stock));
+      }
+
+      if (returnMovementRef && input.returnToStock) {
+        const returnSnap = productSnapshots.get(sourceLine.productId);
+        const returnProduct = returnSnap.data() as Product;
+        const previousStock = Number(runningStocks.get(sourceLine.productId) || 0);
+        const newStock = previousStock + quantity;
+        runningStocks.set(sourceLine.productId, newStock);
+
+        transaction.set(
+          returnMovementRef,
+          cleanData({
+            id: returnMovementRef.id,
+            productId: sourceLine.productId,
+            productName: sourceLine.productName,
+            productCode: sourceLine.productCode || returnProduct.code || '',
+            barcode: sourceLine.barcode || returnProduct.barcode,
+            size: sourceLine.size || returnProduct.size,
+            color: sourceLine.color || returnProduct.color,
+            type: 'RETURN',
+            quantityChange: quantity,
+            previousStock,
+            newStock,
+            timestamp: now,
+            userId: input.userId,
+            userName: input.userName,
+            referenceId: `${saleId}:${adjustmentId}`,
+            note:
+              adjustment.type === 'exchange'
+                ? 'Producto reingresado por cambio de mercadería.'
+                : 'Producto reingresado por devolución.',
+            unitCost: returnedCostAtSale,
+          }),
+        );
+      }
+
+      if (replacementMovementRef && replacementItem) {
+        const replacementSnap = productSnapshots.get(replacementItem.productId);
+        const replacementProduct = replacementSnap.data() as Product;
+        const previousStock = Number(
+          runningStocks.get(replacementItem.productId) ??
+            getNumericStock(replacementProduct.stock),
+        );
+        const newStock = previousStock - replacementQuantity;
+        runningStocks.set(replacementItem.productId, newStock);
+
+        transaction.set(
+          replacementMovementRef,
+          cleanData({
+            id: replacementMovementRef.id,
+            productId: replacementItem.productId,
+            productName: replacementItem.productName,
+            productCode: replacementItem.productCode || replacementProduct.code || '',
+            barcode: replacementItem.barcode || replacementProduct.barcode,
+            size: replacementItem.size || replacementProduct.size,
+            color: replacementItem.color || replacementProduct.color,
+            type: 'EXCHANGE_OUT',
+            quantityChange: -replacementQuantity,
+            previousStock,
+            newStock,
+            timestamp: now,
+            userId: input.userId,
+            userName: input.userName,
+            referenceId: `${saleId}:${adjustmentId}`,
+            note: 'Producto entregado al cliente como reemplazo en un cambio.',
+            unitCost: replacementItem.costAtSale,
+          }),
+        );
+      }
+
+      // Aplicar stocks finales.
       for (const [productId, delta] of Array.from(stockDeltas.entries())) {
         const snap = productSnapshots.get(productId);
         const product = snap.data() as Product;
@@ -1871,7 +1958,7 @@ export const StorageService = {
           doc(db, COLLECTIONS.PRODUCTS, productId),
           {
             stock: currentStock + delta,
-            updatedAt: Date.now(),
+            updatedAt: now,
           },
         );
       }
