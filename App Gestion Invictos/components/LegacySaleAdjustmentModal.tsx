@@ -19,6 +19,7 @@ import {
   Landmark,
   History,
   AlertTriangle,
+  ArchiveRestore,
 } from 'lucide-react';
 
 interface LegacySaleAdjustmentModalProps {
@@ -28,6 +29,7 @@ interface LegacySaleAdjustmentModalProps {
 }
 
 type SettlementMethod = Exclude<PaymentMethod, 'account'>;
+type ReturnedSource = 'inventory' | 'manual';
 
 const money = (value: number): string =>
   Number(value || 0).toLocaleString('es-AR', {
@@ -65,8 +67,20 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
   const [customerName, setCustomerName] = useState('');
   const [originalSaleDate, setOriginalSaleDate] = useState('');
 
+  const [returnedSource, setReturnedSource] =
+    useState<ReturnedSource>('inventory');
   const [returnSearch, setReturnSearch] = useState('');
   const [returnedProductId, setReturnedProductId] = useState('');
+
+  const [manualName, setManualName] = useState('');
+  const [manualReferenceCode, setManualReferenceCode] = useState('');
+  const [manualSize, setManualSize] = useState('');
+  const [manualColor, setManualColor] = useState('');
+  const [manualCategory, setManualCategory] = useState('');
+  const [manualProvider, setManualProvider] = useState('');
+  const [manualResalePrice, setManualResalePrice] = useState('');
+  const [manualCost, setManualCost] = useState('');
+
   const [quantity, setQuantity] = useState(1);
   const [originalUnitAmount, setOriginalUnitAmount] = useState('');
   const [returnToStock, setReturnToStock] = useState(true);
@@ -96,9 +110,7 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
         if (!cancelled) setProducts(Array.isArray(result) ? result : []);
       } catch (e) {
         console.error(e);
-        if (!cancelled) {
-          setError('No se pudo cargar el inventario.');
-        }
+        if (!cancelled) setError('No se pudo cargar el inventario.');
       } finally {
         if (!cancelled) setLoadingProducts(false);
       }
@@ -147,12 +159,20 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
       .filter((product) => {
         const available = Number(product.stock || 0);
         const sameReturnedProduct =
-          returnToStock && product.id === returnedProductId;
+          returnedSource === 'inventory' &&
+          returnToStock &&
+          product.id === returnedProductId;
         return available > 0 || sameReturnedProduct;
       })
       .filter((product) => !term || matchesTerm(product, term))
       .slice(0, 40);
-  }, [products, replacementSearch, returnToStock, returnedProductId]);
+  }, [
+    products,
+    replacementSearch,
+    returnedSource,
+    returnToStock,
+    returnedProductId,
+  ]);
 
   const originalUnit = Math.max(0, Number(originalUnitAmount || 0));
   const returnCredit = originalUnit * quantity;
@@ -165,7 +185,9 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
 
   const availableReplacementStock = selectedReplacement
     ? Number(selectedReplacement.stock || 0) +
-      (returnToStock && selectedReplacement.id === returnedProductId
+      (returnedSource === 'inventory' &&
+      returnToStock &&
+      selectedReplacement.id === returnedProductId
         ? quantity
         : 0)
     : 0;
@@ -173,8 +195,13 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
   const handleSave = async () => {
     setError('');
 
-    if (!returnedProduct) {
+    if (returnedSource === 'inventory' && !returnedProduct) {
       setError('Seleccioná el producto que devuelve el cliente.');
+      return;
+    }
+
+    if (returnedSource === 'manual' && !manualName.trim()) {
+      setError('Ingresá una descripción del producto que devuelve el cliente.');
       return;
     }
 
@@ -185,6 +212,17 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
 
     if (!Number.isFinite(originalUnit) || originalUnit <= 0) {
       setError('Ingresá cuánto pagó originalmente el cliente por cada unidad.');
+      return;
+    }
+
+    if (
+      returnedSource === 'manual' &&
+      returnToStock &&
+      Math.max(0, Number(manualResalePrice || 0)) <= 0
+    ) {
+      setError(
+        'Para reincorporar el producto al inventario, indicá su precio actual de venta.',
+      );
       return;
     }
 
@@ -207,7 +245,24 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
 
     try {
       const adjustment = await StorageService.registerLegacySaleAdjustment({
-        returnedProductId: returnedProduct.id,
+        returnedProductSource: returnedSource,
+        returnedProductId:
+          returnedSource === 'inventory' ? returnedProduct?.id : undefined,
+        manualReturnedProduct:
+          returnedSource === 'manual'
+            ? {
+                name: manualName.trim(),
+                referenceCode: manualReferenceCode.trim() || undefined,
+                size: manualSize.trim() || undefined,
+                color: manualColor.trim() || undefined,
+                category: manualCategory.trim() || undefined,
+                provider: manualProvider.trim() || undefined,
+                resalePrice: returnToStock
+                  ? Math.max(0, Number(manualResalePrice || 0))
+                  : undefined,
+                cost: Math.max(0, Number(manualCost || 0)),
+              }
+            : undefined,
         quantity,
         originalUnitAmount: originalUnit,
         returnToStock,
@@ -282,7 +337,7 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex gap-2 text-sm text-amber-800">
             <AlertTriangle size={18} className="shrink-0 mt-0.5" />
             <div>
-              El importe original se carga manualmente porque la venta no existe en INVICTOS. La operación quedará identificada como anterior al sistema.
+              El importe original se carga manualmente. Si el producto viejo ya no existe en el inventario, también puede registrarse manualmente.
             </div>
           </div>
 
@@ -327,92 +382,174 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
               Producto que vuelve
             </div>
 
-            <div className="p-4 space-y-3">
-              <div className="relative">
-                <Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="text"
-                  value={returnSearch}
-                  onChange={(e) => setReturnSearch(e.target.value)}
-                  placeholder="Buscar producto vendido antes del sistema..."
-                  className="w-full border border-slate-300 rounded-xl pl-9 pr-3 py-2.5"
-                />
+            <div className="p-4 space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReturnedSource('inventory');
+                    setError('');
+                  }}
+                  className={`p-3 rounded-xl border text-left ${
+                    returnedSource === 'inventory'
+                      ? 'bg-emerald-50 border-emerald-400 text-emerald-900'
+                      : 'bg-white border-slate-300 text-slate-700'
+                  }`}
+                >
+                  <div className="font-bold">Existe en Inventario</div>
+                  <div className="text-xs mt-1">Buscar y seleccionar el artículo registrado.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReturnedSource('manual');
+                    setReturnedProductId('');
+                    setError('');
+                  }}
+                  className={`p-3 rounded-xl border text-left ${
+                    returnedSource === 'manual'
+                      ? 'bg-amber-50 border-amber-400 text-amber-900'
+                      : 'bg-white border-slate-300 text-slate-700'
+                  }`}
+                >
+                  <div className="font-bold">Ya no está en Inventario</div>
+                  <div className="text-xs mt-1">Cargar manualmente el producto agotado o eliminado.</div>
+                </button>
               </div>
 
-              {loadingProducts ? (
-                <div className="text-sm text-slate-400 py-4 text-center">Cargando inventario…</div>
-              ) : (
-                <div className="border border-slate-200 rounded-xl max-h-52 overflow-y-auto divide-y divide-slate-100">
-                  {returnedProducts.map((product) => {
-                    const selected = product.id === returnedProductId;
-                    return (
-                      <button
-                        key={product.id}
-                        type="button"
-                        onClick={() => {
-                          setReturnedProductId(product.id);
-                          setQuantity(1);
-                          setError('');
-                        }}
-                        className={`w-full text-left p-3 flex items-center justify-between gap-3 ${
-                          selected ? 'bg-emerald-50' : 'hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="font-bold text-slate-900 truncate">{lineLabel(product)}</div>
-                          <div className="text-xs text-slate-500 mt-1">
-                            QR {product.shortCode || '—'} · SKU {product.code || '—'}
-                          </div>
-                        </div>
-                        <div className="text-right shrink-0 text-xs text-slate-500">
-                          Stock actual {Number(product.stock || 0)}
-                        </div>
-                      </button>
-                    );
-                  })}
+              {returnedSource === 'inventory' ? (
+                <>
+                  <div className="relative">
+                    <Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={returnSearch}
+                      onChange={(e) => setReturnSearch(e.target.value)}
+                      placeholder="Buscar producto vendido antes del sistema..."
+                      className="w-full border border-slate-300 rounded-xl pl-9 pr-3 py-2.5"
+                    />
+                  </div>
 
-                  {!returnedProducts.length && (
-                    <div className="p-5 text-center text-sm text-slate-400">
-                      No se encontraron productos.
+                  {loadingProducts ? (
+                    <div className="text-sm text-slate-400 py-4 text-center">Cargando inventario…</div>
+                  ) : (
+                    <div className="border border-slate-200 rounded-xl max-h-52 overflow-y-auto divide-y divide-slate-100">
+                      {returnedProducts.map((product) => {
+                        const selected = product.id === returnedProductId;
+                        return (
+                          <button
+                            key={product.id}
+                            type="button"
+                            onClick={() => {
+                              setReturnedProductId(product.id);
+                              setQuantity(1);
+                              setError('');
+                            }}
+                            className={`w-full text-left p-3 flex items-center justify-between gap-3 ${
+                              selected ? 'bg-emerald-50' : 'hover:bg-slate-50'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="font-bold text-slate-900 truncate">{lineLabel(product)}</div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                QR {product.shortCode || '—'} · SKU {product.code || '—'}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0 text-xs text-slate-500">
+                              Stock actual {Number(product.stock || 0)}
+                            </div>
+                          </button>
+                        );
+                      })}
+
+                      {!returnedProducts.length && (
+                        <div className="p-5 text-center text-sm text-slate-400">
+                          No se encontraron productos. Si ya no existe, usá la opción “Ya no está en Inventario”.
+                        </div>
+                      )}
                     </div>
                   )}
+
+                  {returnedProduct && (
+                    <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3">
+                      <div className="text-xs uppercase font-bold text-emerald-700">Seleccionado</div>
+                      <div className="font-bold text-emerald-950 mt-1">{lineLabel(returnedProduct)}</div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="space-y-3 bg-amber-50 border border-amber-200 rounded-xl p-4">
+                  <div className="flex items-start gap-2 text-sm text-amber-800">
+                    <ArchiveRestore size={18} className="shrink-0 mt-0.5" />
+                    <span>Estos datos identifican el artículo viejo. No se crea automáticamente en Inventario salvo que marques que vuelve al stock.</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="sm:col-span-2">
+                      <label className="block text-xs font-bold text-amber-800 uppercase mb-1">Producto / descripción *</label>
+                      <input
+                        value={manualName}
+                        onChange={(e) => setManualName(e.target.value)}
+                        placeholder="Ej.: Camiseta Argentina 2024"
+                        className="w-full border border-amber-300 rounded-lg px-3 py-2.5 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-amber-800 uppercase mb-1">Código o referencia anterior</label>
+                      <input
+                        value={manualReferenceCode}
+                        onChange={(e) => setManualReferenceCode(e.target.value)}
+                        placeholder="Opcional"
+                        className="w-full border border-amber-300 rounded-lg px-3 py-2.5 bg-white"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-bold text-amber-800 uppercase mb-1">Talle</label>
+                        <input
+                          value={manualSize}
+                          onChange={(e) => setManualSize(e.target.value)}
+                          placeholder="M"
+                          className="w-full border border-amber-300 rounded-lg px-3 py-2.5 bg-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-amber-800 uppercase mb-1">Color</label>
+                        <input
+                          value={manualColor}
+                          onChange={(e) => setManualColor(e.target.value)}
+                          placeholder="Azul"
+                          className="w-full border border-amber-300 rounded-lg px-3 py-2.5 bg-white"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
               )}
 
-              {returnedProduct && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-emerald-50 border border-emerald-100 rounded-xl p-3">
-                  <div className="sm:col-span-1">
-                    <div className="text-xs uppercase font-bold text-emerald-700">Seleccionado</div>
-                    <div className="font-bold text-emerald-950 mt-1">{lineLabel(returnedProduct)}</div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-emerald-700 uppercase mb-1">Cantidad</label>
-                    <input
-                      type="number"
-                      min="1"
-                      value={quantity}
-                      onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value, 10) || 1))}
-                      className="w-full border border-emerald-200 rounded-lg px-3 py-2 bg-white"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-emerald-700 uppercase mb-1">
-                      Pagó originalmente c/u
-                    </label>
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      value={originalUnitAmount}
-                      onChange={(e) => setOriginalUnitAmount(e.target.value)}
-                      placeholder="0"
-                      className="w-full border border-emerald-200 rounded-lg px-3 py-2 bg-white"
-                    />
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Cantidad</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={quantity}
+                    onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
+                  />
                 </div>
-              )}
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 uppercase mb-1">Pagó originalmente c/u</label>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={originalUnitAmount}
+                    onChange={(e) => setOriginalUnitAmount(e.target.value)}
+                    placeholder="0"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2.5 bg-white"
+                  />
+                </div>
+              </div>
 
               <label className="flex items-center gap-3 border border-slate-200 rounded-xl px-3 py-2.5 bg-slate-50 cursor-pointer">
                 <input
@@ -423,9 +560,69 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
                 />
                 <div>
                   <div className="text-sm font-bold text-slate-800">Vuelve al stock disponible</div>
-                  <div className="text-[11px] text-slate-500">Destildar si está roto, manchado o no puede venderse.</div>
+                  <div className="text-[11px] text-slate-500">
+                    Destildar si está roto, manchado o no puede venderse.
+                  </div>
                 </div>
               </label>
+
+              {returnedSource === 'manual' && returnToStock && (
+                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 space-y-3">
+                  <div>
+                    <div className="font-bold text-indigo-900">Reincorporar al Inventario</div>
+                    <div className="text-xs text-indigo-700 mt-1">
+                      Como el artículo ya no existe, INVICTOS lo recreará con stock {quantity}. Podrás editar luego su ficha normalmente.
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">Precio actual de venta *</label>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={manualResalePrice}
+                        onChange={(e) => setManualResalePrice(e.target.value)}
+                        placeholder="0"
+                        className="w-full border border-indigo-300 rounded-lg px-3 py-2.5 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">Costo actual/estimado</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={manualCost}
+                        onChange={(e) => setManualCost(e.target.value)}
+                        placeholder="0 si no se conoce"
+                        className="w-full border border-indigo-300 rounded-lg px-3 py-2.5 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">Categoría</label>
+                      <input
+                        value={manualCategory}
+                        onChange={(e) => setManualCategory(e.target.value)}
+                        placeholder="Opcional"
+                        className="w-full border border-indigo-300 rounded-lg px-3 py-2.5 bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-indigo-800 uppercase mb-1">Proveedor</label>
+                      <input
+                        value={manualProvider}
+                        onChange={(e) => setManualProvider(e.target.value)}
+                        placeholder="Opcional"
+                        className="w-full border border-indigo-300 rounded-lg px-3 py-2.5 bg-white"
+                      />
+                    </div>
+                  </div>
+                  <div className="text-[11px] text-indigo-700">
+                    Si no informás categoría o proveedor se guardará como “Sin categoría” / “Sin proveedor”. El sistema generará un código interno nuevo para evitar duplicados.
+                  </div>
+                </div>
+              )}
 
               <div className="text-sm text-slate-600">
                 Valor reconocido por lo devuelto: <b className="text-slate-900">${money(returnCredit)}</b>
@@ -463,9 +660,10 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
           </div>
 
           {mode === 'exchange' && (
-            <section className="border border-indigo-200 rounded-xl overflow-hidden">
-              <div className="bg-indigo-50 px-4 py-3 border-b border-indigo-100 font-bold text-indigo-900 flex items-center gap-2">
-                <PackageMinus size={18} /> Producto que se lleva
+            <section className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 font-bold text-slate-800 flex items-center gap-2">
+                <PackageMinus size={18} className="text-indigo-600" />
+                Producto que se lleva
               </div>
               <div className="p-4 space-y-3">
                 <div className="relative">
@@ -474,12 +672,12 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
                     type="text"
                     value={replacementSearch}
                     onChange={(e) => setReplacementSearch(e.target.value)}
-                    placeholder="Buscar por nombre, QR, SKU, talle o color..."
+                    placeholder="Buscar producto de reemplazo..."
                     className="w-full border border-slate-300 rounded-xl pl-9 pr-3 py-2.5"
                   />
                 </div>
 
-                <div className="border border-slate-200 rounded-xl max-h-56 overflow-y-auto divide-y divide-slate-100">
+                <div className="border border-slate-200 rounded-xl max-h-52 overflow-y-auto divide-y divide-slate-100">
                   {replacementProducts.map((product) => {
                     const selected = product.id === replacementProductId;
                     return (
@@ -497,37 +695,36 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
                       >
                         <div className="min-w-0">
                           <div className="font-bold text-slate-900 truncate">{lineLabel(product)}</div>
-                          <div className="text-xs text-slate-500 mt-1">QR {product.shortCode || '—'} · SKU {product.code || '—'}</div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          <div className="font-bold text-slate-900">${money(product.price)}</div>
-                          <div className="text-xs text-slate-500">Stock {Number(product.stock || 0)}</div>
+                          <div className="text-xs text-slate-500 mt-1">
+                            ${money(product.price)} · Stock {Number(product.stock || 0)}
+                          </div>
                         </div>
                       </button>
                     );
                   })}
 
                   {!replacementProducts.length && (
-                    <div className="p-5 text-center text-sm text-slate-400">No hay productos con stock para esta búsqueda.</div>
+                    <div className="p-5 text-center text-sm text-slate-400">No hay productos disponibles.</div>
                   )}
                 </div>
 
                 {selectedReplacement && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-indigo-50 border border-indigo-100 rounded-xl p-3">
-                    <div>
-                      <div className="text-xs text-indigo-600 uppercase font-bold">Seleccionado</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-indigo-50 border border-indigo-100 rounded-xl p-3">
+                    <div className="sm:col-span-2">
+                      <div className="text-xs uppercase font-bold text-indigo-700">Seleccionado</div>
                       <div className="font-bold text-indigo-950 mt-1">{lineLabel(selectedReplacement)}</div>
+                      <div className="text-xs text-indigo-700 mt-1">${money(selectedReplacement.price)} c/u</div>
                     </div>
                     <div>
-                      <label className="block text-xs font-bold text-indigo-700 uppercase mb-1">Cantidad que se lleva</label>
+                      <label className="block text-xs font-bold text-indigo-700 uppercase mb-1">Cantidad</label>
                       <input
                         type="number"
                         min="1"
+                        max={Math.max(1, availableReplacementStock)}
                         value={replacementQuantity}
                         onChange={(e) => setReplacementQuantity(Math.max(1, parseInt(e.target.value, 10) || 1))}
                         className="w-full border border-indigo-200 rounded-lg px-3 py-2 bg-white"
                       />
-                      <div className="text-[11px] text-indigo-600 mt-1">Disponible para esta operación: {availableReplacementStock}</div>
                     </div>
                   </div>
                 )}
@@ -535,24 +732,29 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
             </section>
           )}
 
-          <section className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-            <div className="flex items-center justify-between gap-4">
-              <span className="font-bold text-slate-700">
-                {Math.abs(difference) < 0.01
-                  ? 'Sin diferencia'
-                  : difference > 0
-                    ? 'Diferencia a cobrar'
-                    : 'Devolución al cliente'}
-              </span>
-              <span className={`text-2xl font-black ${
-                difference > 0
-                  ? 'text-emerald-700'
-                  : difference < 0
-                    ? 'text-red-600'
-                    : 'text-slate-700'
-              }`}>
-                ${money(Math.abs(difference))}
-              </span>
+          <section className="border border-slate-200 rounded-xl p-4">
+            <div className="font-bold text-slate-800 mb-3">Diferencia de la operación</div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+              <div className="bg-slate-50 rounded-lg p-3">
+                <div className="text-slate-500">Se reconoce</div>
+                <div className="font-black text-slate-900 mt-1">${money(returnCredit)}</div>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-3">
+                <div className="text-slate-500">Producto nuevo</div>
+                <div className="font-black text-slate-900 mt-1">${money(replacementTotal)}</div>
+              </div>
+              <div className="bg-slate-50 rounded-lg p-3">
+                <div className="text-slate-500">
+                  {Math.abs(difference) < 0.01
+                    ? 'Sin diferencia'
+                    : difference > 0
+                      ? 'A cobrar'
+                      : 'A devolver'}
+                </div>
+                <div className={`font-black mt-1 ${difference > 0 ? 'text-emerald-700' : difference < 0 ? 'text-red-600' : 'text-slate-900'}`}>
+                  ${money(Math.abs(difference))}
+                </div>
+              </div>
             </div>
 
             {Math.abs(difference) >= 0.01 && (
@@ -579,7 +781,8 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
                             : 'bg-white border-slate-300 text-slate-700'
                         }`}
                       >
-                        <Cmp size={15} /> {label}
+                        <Cmp size={15} />
+                        {label}
                       </button>
                     );
                   })}
@@ -604,7 +807,7 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
               rows={3}
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Motivo del cambio, estado de la prenda, comprobante antiguo, acuerdo con el cliente..."
+              placeholder="Motivo del cambio, estado de la prenda, comprobante anterior si existe..."
               className="w-full border border-slate-300 rounded-xl px-3 py-2.5 resize-none"
             />
           </div>
@@ -612,7 +815,9 @@ const LegacySaleAdjustmentModal: React.FC<LegacySaleAdjustmentModalProps> = ({
 
         <div
           className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4"
-          style={{ paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}
+          style={{
+            paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+          }}
         >
           <div className="grid grid-cols-2 gap-3">
             <button
