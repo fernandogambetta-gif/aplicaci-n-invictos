@@ -226,7 +226,7 @@ export interface SaleAdjustment {
   replacementItem?: SaleAdjustmentLine;
 
   // Positivo: diferencia cobrada al cliente.
-  // Negativo: devolución/saldo a favor del cliente.
+  // Negativo: importe devuelto al cliente.
   difference: number;
   settlement: SaleAdjustmentSettlement;
 
@@ -326,6 +326,7 @@ export type InventoryMovementType =
   | 'SALE'
   | 'ADJUSTMENT'
   | 'RETURN'
+  | 'EXCHANGE_OUT'
   | 'CANCELLED_SALE';
 
 export interface InventoryMovement {
