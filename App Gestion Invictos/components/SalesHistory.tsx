@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Sale,
   SaleAdjustment,
+  LegacySaleAdjustment,
   SaleItem,
   User,
   Product,
@@ -13,6 +14,8 @@ import { StorageService } from '../services/storageService';
 import AccountsReceivablePanel from './AccountsReceivablePanel';
 import SaleAdjustmentModal from './SaleAdjustmentModal';
 import SaleAdjustmentReceiptModal from './SaleAdjustmentReceiptModal';
+import LegacySaleAdjustmentModal from './LegacySaleAdjustmentModal';
+import LegacySaleAdjustmentReceiptModal from './LegacySaleAdjustmentReceiptModal';
 import {
   Calendar,
   DollarSign,
@@ -27,6 +30,7 @@ import {
   Filter,
   ArrowLeftRight,
   Search,
+  History,
 } from 'lucide-react';
 
 interface SalesHistoryProps {
@@ -165,6 +169,12 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     adjustment: SaleAdjustment;
   } | null>(null);
 
+  const [legacyAdjustmentOpen, setLegacyAdjustmentOpen] = useState(false);
+  const [legacyAdjustmentReceipt, setLegacyAdjustmentReceipt] =
+    useState<LegacySaleAdjustment | null>(null);
+  const [legacyAdjustments, setLegacyAdjustments] =
+    useState<LegacySaleAdjustment[]>([]);
+
   // Búsqueda global del historial para ubicar ventas ante cambios/devoluciones.
   const [saleSearch, setSaleSearch] = useState('');
 
@@ -223,18 +233,24 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
   useEffect(() => {
     const load = async () => {
       try {
-        const [loadedUsers, loadedProducts, loadedExpenses] =
-          await Promise.all([
-            StorageService.getUsers(),
-            StorageService.getProducts(),
-            isAdmin
-              ? StorageService.getExpenses()
-              : Promise.resolve([] as Expense[]),
-          ]);
+        const [
+          loadedUsers,
+          loadedProducts,
+          loadedExpenses,
+          loadedLegacyAdjustments,
+        ] = await Promise.all([
+          StorageService.getUsers(),
+          StorageService.getProducts(),
+          isAdmin
+            ? StorageService.getExpenses()
+            : Promise.resolve([] as Expense[]),
+          StorageService.getLegacySaleAdjustments(),
+        ]);
 
         setUsers(loadedUsers);
         setProducts(loadedProducts);
         setExpenses(loadedExpenses);
+        setLegacyAdjustments(loadedLegacyAdjustments);
       } catch (error) {
         console.error(
           'Error cargando datos auxiliares del historial:',
@@ -482,6 +498,66 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     paymentFilter,
   ]);
 
+  const accessibleLegacyAdjustments = useMemo(
+    () =>
+      isAdmin
+        ? legacyAdjustments
+        : legacyAdjustments.filter(
+            (adjustment) =>
+              adjustment.recordedByUserId === currentUser.id,
+          ),
+    [legacyAdjustments, isAdmin, currentUser.id],
+  );
+
+  const periodLegacyAdjustments = useMemo(
+    () =>
+      accessibleLegacyAdjustments.filter((adjustment) => {
+        if (
+          adjustment.timestamp < range.start ||
+          adjustment.timestamp > range.end
+        ) {
+          return false;
+        }
+
+        if (paymentFilter === 'ALL') return true;
+        return adjustment.settlement?.method === paymentFilter;
+      }),
+    [
+      accessibleLegacyAdjustments,
+      range.start,
+      range.end,
+      paymentFilter,
+    ],
+  );
+
+  const legacyFinancialAdjustments = useMemo(
+    () =>
+      isAdmin && sellerFilter === 'ALL'
+        ? periodLegacyAdjustments
+        : [],
+    [isAdmin, sellerFilter, periodLegacyAdjustments],
+  );
+
+  const legacyAdjustmentNetCost = (
+    adjustment: LegacySaleAdjustment,
+  ): number => {
+    let cost = 0;
+
+    if (adjustment.returnedItem.returnToStock) {
+      cost -=
+        Math.max(0, Number(adjustment.returnedItem.costAtSale || 0)) *
+        Math.max(0, Number(adjustment.returnedItem.quantity || 0));
+    }
+
+    if (adjustment.replacementItem) {
+      cost +=
+        Math.max(0, Number(adjustment.replacementItem.costAtSale || 0)) *
+        Math.max(0, Number(adjustment.replacementItem.quantity || 0));
+    }
+
+    return cost;
+  };
+
   const productMap = useMemo(
     () =>
       new Map(
@@ -691,10 +767,24 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
       if (result.missing) missingCostItems += 1;
     });
 
-    const revenue = filteredSales.reduce(
-      (acc, sale) => acc + saleNetTotal(sale),
+    const legacyNetMovement = legacyFinancialAdjustments.reduce(
+      (acc, adjustment) =>
+        acc + Number(adjustment.difference || 0),
       0,
     );
+
+    const legacyCostImpact = legacyFinancialAdjustments.reduce(
+      (acc, adjustment) => acc + legacyAdjustmentNetCost(adjustment),
+      0,
+    );
+
+    merchandiseCost += legacyCostImpact;
+
+    const revenue =
+      filteredSales.reduce(
+        (acc, sale) => acc + saleNetTotal(sale),
+        0,
+      ) + legacyNetMovement;
 
     const discounts = filteredSales.reduce(
       (acc, sale) =>
@@ -732,6 +822,9 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
         contribution - operatingExpenses,
       estimatedCostItems,
       missingCostItems,
+      legacyAdjustmentCount: legacyFinancialAdjustments.length,
+      legacyNetMovement,
+      legacyCostImpact,
     };
   }, [
     filteredSales,
@@ -739,6 +832,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     productMap,
     isAdmin,
     sellerFilter,
+    legacyFinancialAdjustments,
   ]);
 
   const sellerSummaries =
@@ -1441,6 +1535,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
           )}`}
         />
 
+        {isAdmin && sellerFilter === 'ALL' && summary.legacyAdjustmentCount > 0 && (
+          <SummaryCard
+            label="Ventas previas · ajustes"
+            value={`$${money(summary.legacyNetMovement)}`}
+            sub={`${summary.legacyAdjustmentCount} cambio(s)/devolución(es) · sin venta histórica`}
+          />
+        )}
+
         {isAdmin && (
           <>
             <SummaryCard
@@ -1607,15 +1709,26 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={exportSalesCsv}
-                disabled={!tableSales.length}
-                className="px-4 py-2.5 rounded-xl bg-slate-900 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-40"
-              >
-                <Download size={17} />
-                Exportar CSV
-              </button>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  type="button"
+                  onClick={() => setLegacyAdjustmentOpen(true)}
+                  className="px-4 py-2.5 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold flex items-center justify-center gap-2"
+                >
+                  <History size={17} />
+                  Venta anterior al sistema
+                </button>
+
+                <button
+                  type="button"
+                  onClick={exportSalesCsv}
+                  disabled={!tableSales.length}
+                  className="px-4 py-2.5 rounded-xl bg-slate-900 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-40"
+                >
+                  <Download size={17} />
+                  Exportar CSV
+                </button>
+              </div>
             </div>
 
             <div className="relative">
@@ -1944,6 +2057,88 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                     </td>
                   </tr>
                 )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === 'sales' && periodLegacyAdjustments.length > 0 && (
+        <div className="bg-white border border-amber-200 rounded-2xl shadow-sm overflow-hidden">
+          <div className="p-4 border-b border-amber-100 bg-amber-50">
+            <div className="font-bold text-amber-900 flex items-center gap-2">
+              <History size={18} />
+              Cambios / devoluciones de ventas anteriores al sistema
+            </div>
+            <div className="text-xs text-amber-700 mt-1">
+              Estas operaciones no crean ventas históricas ni comisiones retroactivas. En el resultado global solo se considera la diferencia cobrada o devuelta ahora.
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left min-w-[900px]">
+              <thead className="bg-slate-50 border-b border-slate-200">
+                <tr>
+                  <Th>Fecha</Th>
+                  <Th>Cliente</Th>
+                  <Th>Producto devuelto</Th>
+                  <Th>Producto entregado</Th>
+                  <Th align="right">Movimiento actual</Th>
+                  <Th>Registrado por</Th>
+                  <Th align="right">Comprobante</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {periodLegacyAdjustments.map((adjustment) => (
+                  <tr key={adjustment.id} className="border-b border-slate-100 last:border-b-0">
+                    <Td>{formatDateTime(adjustment.timestamp)}</Td>
+                    <Td>{adjustment.customerName || 'No informado'}</Td>
+                    <Td>
+                      <div className="font-semibold text-slate-800">
+                        {adjustment.returnedItem.quantity} × {adjustment.returnedItem.productName}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Reconocido: ${money(adjustment.returnedItem.totalAmount)} · {adjustment.returnedItem.returnToStock ? 'volvió al stock' : 'no volvió al stock'}
+                      </div>
+                    </Td>
+                    <Td>
+                      {adjustment.replacementItem ? (
+                        <>
+                          <div className="font-semibold text-slate-800">
+                            {adjustment.replacementItem.quantity} × {adjustment.replacementItem.productName}
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            ${money(adjustment.replacementItem.totalAmount)}
+                          </div>
+                        </>
+                      ) : (
+                        <span className="text-slate-400">Solo devolución</span>
+                      )}
+                    </Td>
+                    <Td align="right">
+                      <span className={
+                        Number(adjustment.difference || 0) > 0
+                          ? 'font-bold text-emerald-700'
+                          : Number(adjustment.difference || 0) < 0
+                            ? 'font-bold text-red-600'
+                            : 'font-bold text-slate-700'
+                      }>
+                        {Number(adjustment.difference || 0) > 0 ? '+' : ''}
+                        ${money(Number(adjustment.difference || 0))}
+                      </span>
+                    </Td>
+                    <Td>{adjustment.recordedByUserName}</Td>
+                    <Td align="right">
+                      <button
+                        type="button"
+                        onClick={() => setLegacyAdjustmentReceipt(adjustment)}
+                        className="px-3 py-2 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold"
+                      >
+                        Ver / imprimir
+                      </button>
+                    </Td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -2365,6 +2560,25 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
             </div>
           </div>
         )}
+
+      {legacyAdjustmentOpen && (
+        <LegacySaleAdjustmentModal
+          currentUser={currentUser}
+          onClose={() => setLegacyAdjustmentOpen(false)}
+          onSaved={async () => {
+            await Promise.resolve(onUpdate?.());
+            const updated = await StorageService.getLegacySaleAdjustments();
+            setLegacyAdjustments(updated);
+          }}
+        />
+      )}
+
+      {legacyAdjustmentReceipt && (
+        <LegacySaleAdjustmentReceiptModal
+          adjustment={legacyAdjustmentReceipt}
+          onClose={() => setLegacyAdjustmentReceipt(null)}
+        />
+      )}
 
       {adjustmentSale && (
         <SaleAdjustmentModal
