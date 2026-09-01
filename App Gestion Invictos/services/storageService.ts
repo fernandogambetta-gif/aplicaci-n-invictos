@@ -12,6 +12,7 @@ import {
   SaleAdjustment,
   SaleAdjustmentLine,
   LegacySaleAdjustment,
+  CheckoutReturnCredit,
   SocietyValuation,
   SocietyAsset,
   SocietyPartner,
@@ -192,6 +193,110 @@ const normalizeShortCode = (value: string): string =>
 const getNumericStock = (value: unknown): number => {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+};
+
+const extractValidShortCode = (value: unknown): number | null => {
+  const clean = normalizeShortCode(String(value || ''));
+  if (!/^\d{4,6}$/.test(clean)) return null;
+  const parsed = Number(clean);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+/**
+ * Mayor código corto que haya aparecido alguna vez.
+ * Revisa productos actuales, ventas históricas y cambios/devoluciones.
+ */
+const getHistoricalMaxShortCode = async (): Promise<number> => {
+  if (!db) throw new Error('Firestore no inicializado');
+
+  const [productsSnap, salesSnap, legacySnap] = await Promise.all([
+    getDocs(collection(db, COLLECTIONS.PRODUCTS)),
+    getDocs(collection(db, COLLECTIONS.SALES)),
+    getDocs(collection(db, COLLECTIONS.LEGACY_SALE_ADJUSTMENTS)),
+  ]);
+
+  let maxCode = 999;
+
+  const consider = (value: unknown) => {
+    const parsed = extractValidShortCode(value);
+    if (parsed !== null && parsed > maxCode) maxCode = parsed;
+  };
+
+  productsSnap.docs.forEach((productDoc) => {
+    const product = productDoc.data() as Product;
+    consider(product.shortCode);
+  });
+
+  salesSnap.docs.forEach((saleDoc) => {
+    const sale = saleDoc.data() as Sale;
+
+    (Array.isArray(sale.items) ? sale.items : []).forEach((item) => {
+      consider(item.shortCode);
+    });
+
+    (Array.isArray(sale.adjustments) ? sale.adjustments : []).forEach(
+      (adjustment) => {
+        consider(adjustment.returnedItem?.shortCode);
+        consider(adjustment.replacementItem?.shortCode);
+      },
+    );
+  });
+
+  legacySnap.docs.forEach((adjustmentDoc) => {
+    const adjustment = adjustmentDoc.data() as LegacySaleAdjustment;
+    consider(adjustment.returnedItem?.shortCode);
+    consider(adjustment.replacementItem?.shortCode);
+  });
+
+  return maxCode;
+};
+
+/**
+ * Reserva códigos de forma monotónica. Nunca rellena huecos: siempre continúa
+ * por encima del mayor código histórico conocido.
+ */
+const allocateProductShortCodesInternal = async (
+  count: number,
+): Promise<string[]> => {
+  if (!db) throw new Error('Firestore no inicializado');
+
+  const cleanCount = Math.max(0, Math.floor(Number(count || 0)));
+  if (cleanCount === 0) return [];
+
+  const historicalMax = await getHistoricalMaxShortCode();
+  const sequenceRef = doc(db, COLLECTIONS.CONFIG, 'main');
+
+  return runTransaction(db, async (transaction) => {
+    const sequenceSnap = await transaction.get(sequenceRef);
+    const storedNext = sequenceSnap.exists()
+      ? Number(sequenceSnap.data()?.nextProductShortCode || 1000)
+      : 1000;
+
+    let nextCode = Math.max(
+      1000,
+      historicalMax + 1,
+      Number.isFinite(storedNext) ? Math.floor(storedNext) : 1000,
+    );
+
+    if (nextCode + cleanCount - 1 > 999999) {
+      throw new Error('Se alcanzó el límite de códigos cortos de 6 dígitos.');
+    }
+
+    const allocated = Array.from(
+      { length: cleanCount },
+      (_, index) => String(nextCode + index),
+    );
+
+    nextCode += cleanCount;
+
+    transaction.set(
+      sequenceRef,
+      { nextProductShortCode: nextCode, updatedAt: Date.now() },
+      { merge: true },
+    );
+
+    return allocated;
+  });
 };
 
 const logFirestoreInfo = () => {
@@ -899,7 +1004,7 @@ export const StorageService = {
       a.id.localeCompare(b.id),
     );
 
-    const used = new Set<string>();
+    const seenCurrentCodes = new Set<string>();
     const toAssign: typeof productDocs = [];
 
     productDocs.forEach((productDoc) => {
@@ -907,8 +1012,8 @@ export const StorageService = {
       const current = normalizeShortCode(data.shortCode || '');
       const valid = /^\d{4,6}$/.test(current);
 
-      if (valid && !used.has(current)) {
-        used.add(current);
+      if (valid && !seenCurrentCodes.has(current)) {
+        seenCurrentCodes.add(current);
       } else {
         toAssign.push(productDoc);
       }
@@ -916,19 +1021,7 @@ export const StorageService = {
 
     if (toAssign.length === 0) return 0;
 
-    let candidate = 1000;
-
-    const nextFree = (): string => {
-      while (used.has(String(candidate))) {
-        candidate += 1;
-      }
-
-      const code = String(candidate);
-      used.add(code);
-      candidate += 1;
-      return code;
-    };
-
+    const allocated = await allocateProductShortCodesInternal(toAssign.length);
     let updated = 0;
 
     for (let startIndex = 0; startIndex < toAssign.length; startIndex += 400) {
@@ -936,9 +1029,9 @@ export const StorageService = {
       const chunk = toAssign.slice(startIndex, startIndex + 400);
       const now = Date.now();
 
-      chunk.forEach((productDoc) => {
+      chunk.forEach((productDoc, index) => {
         batch.update(productDoc.ref, {
-          shortCode: nextFree(),
+          shortCode: allocated[startIndex + index],
           updatedAt: now,
         });
       });
@@ -950,33 +1043,50 @@ export const StorageService = {
     return updated;
   },
 
+  allocateProductShortCodes: async (count: number): Promise<string[]> =>
+    allocateProductShortCodesInternal(count),
+
 
   saveProduct: async (product: Product): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
 
     const now = Date.now();
+    const productRef = doc(db, COLLECTIONS.PRODUCTS, product.id);
+    const existingSnap = await getDoc(productRef);
+
+    let shortCode = normalizeShortCode(product.shortCode || '');
+
+    // El código QR asignado a un producto es inmutable.
+    if (existingSnap.exists()) {
+      const existing = existingSnap.data() as Product;
+      const previousShortCode = normalizeShortCode(existing.shortCode || '');
+      if (previousShortCode) {
+        shortCode = previousShortCode;
+      } else {
+        [shortCode] = await allocateProductShortCodesInternal(1);
+      }
+    } else {
+      [shortCode] = await allocateProductShortCodesInternal(1);
+    }
 
     const data: any = cleanData({
       ...product,
-      shortCode: product.shortCode
-        ? normalizeShortCode(product.shortCode)
-        : undefined,
+      shortCode,
       barcode: product.barcode
         ? normalizeBarcode(product.barcode)
         : undefined,
       active: product.active !== false,
-      createdAt: product.createdAt || now,
+      createdAt:
+        (existingSnap.exists()
+          ? (existingSnap.data() as Product).createdAt
+          : undefined) ||
+        product.createdAt ||
+        now,
       updatedAt: now,
     });
 
-    // La comisión pertenece al usuario/configuración, no al producto.
     delete data.commissionPercentage;
-
-    await setDoc(
-      doc(db, COLLECTIONS.PRODUCTS, product.id),
-      data,
-      { merge: true },
-    );
+    await setDoc(productRef, data, { merge: true });
   },
 
   /**
@@ -999,9 +1109,10 @@ export const StorageService = {
       );
     }
 
-    const currentSnapshot = await getDocs(
-      collection(db, COLLECTIONS.PRODUCTS),
-    );
+    const [currentSnapshot, historicalMaxBeforeSave] = await Promise.all([
+      getDocs(collection(db, COLLECTIONS.PRODUCTS)),
+      getHistoricalMaxShortCode(),
+    ]);
 
     const existingCodes = new Set<string>();
     const existingShortCodes = new Set<string>();
@@ -1050,6 +1161,12 @@ export const StorageService = {
       ) {
         throw new Error(
           `El código corto "${shortCode}" ya existe.`,
+        );
+      }
+
+      if (Number(shortCode) <= historicalMaxBeforeSave) {
+        throw new Error(
+          `El código corto "${shortCode}" ya pertenece al historial y no puede reutilizarse.`,
         );
       }
 
@@ -1110,8 +1227,61 @@ export const StorageService = {
     requestingUserId: string,
   ): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
-    await assertAdminUser(requestingUserId);
-    await deleteDoc(doc(db, COLLECTIONS.PRODUCTS, id));
+
+    const admin = await assertAdminUser(requestingUserId);
+    const productRef = doc(db, COLLECTIONS.PRODUCTS, id);
+    const productSnap = await getDoc(productRef);
+
+    if (!productSnap.exists()) {
+      throw new Error('El producto ya no existe.');
+    }
+
+    const now = Date.now();
+
+    // Nunca se borra físicamente: queda como histórico y conserva sus códigos.
+    await updateDoc(productRef, {
+      active: false,
+      discontinuedAt: now,
+      discontinuedByUserId: admin.id,
+      discontinuedByUserName: admin.name,
+      updatedAt: now,
+    });
+  },
+
+  setProductActive: async (
+    id: string,
+    active: boolean,
+    requestingUserId: string,
+  ): Promise<void> => {
+    if (!db) throw new Error('Firestore no inicializado');
+
+    const admin = await assertAdminUser(requestingUserId);
+    const productRef = doc(db, COLLECTIONS.PRODUCTS, id);
+    const productSnap = await getDoc(productRef);
+
+    if (!productSnap.exists()) {
+      throw new Error('El producto ya no existe.');
+    }
+
+    const now = Date.now();
+
+    if (active) {
+      await updateDoc(productRef, {
+        active: true,
+        reactivatedAt: now,
+        reactivatedByUserId: admin.id,
+        reactivatedByUserName: admin.name,
+        updatedAt: now,
+      });
+    } else {
+      await updateDoc(productRef, {
+        active: false,
+        discontinuedAt: now,
+        discontinuedByUserId: admin.id,
+        discontinuedByUserName: admin.name,
+        updatedAt: now,
+      });
+    }
   },
 
   updateStock: async (
@@ -1122,9 +1292,18 @@ export const StorageService = {
     if (!db) throw new Error('Firestore no inicializado');
     if (!Number.isFinite(quantityChange) || quantityChange === 0) return;
     await assertAdminUser(requestingUserId);
+    const now = Date.now();
+
     await updateDoc(doc(db, COLLECTIONS.PRODUCTS, productId), {
       stock: increment(quantityChange),
-      updatedAt: Date.now(),
+      ...(quantityChange > 0
+        ? {
+            active: true,
+            reactivatedAt: now,
+            reactivatedByUserId: requestingUserId,
+          }
+        : {}),
+      updatedAt: now,
     });
   },
 
@@ -1160,7 +1339,7 @@ export const StorageService = {
       const newStock = previousStock + cleanQuantity;
       const now = Date.now();
       const costToSave = Number(newCost);
-      const productUpdate: Record<string, unknown> = { stock: newStock, updatedAt: now };
+      const productUpdate: Record<string, unknown> = { stock: newStock, active: true, reactivatedAt: now, updatedAt: now };
       if (Number.isFinite(costToSave) && costToSave > 0) productUpdate.cost = costToSave;
 
       transaction.update(productRef, productUpdate);
@@ -1246,7 +1425,7 @@ export const StorageService = {
       const newStock = previousStock + cleanQuantity;
       const now = Date.now();
       const costToSave = Number(newCost);
-      const productUpdate: Record<string, unknown> = { stock: newStock, updatedAt: now };
+      const productUpdate: Record<string, unknown> = { stock: newStock, active: true, reactivatedAt: now, updatedAt: now };
       if (Number.isFinite(costToSave) && costToSave > 0) productUpdate.cost = costToSave;
 
       transaction.update(productRef, productUpdate);
@@ -1297,72 +1476,687 @@ export const StorageService = {
   addSale: async (sale: Sale): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
 
-    if (!sale.items.length) {
-      throw new Error('La venta no contiene productos.');
+    const checkoutReturns: CheckoutReturnCredit[] = Array.isArray(
+      sale.checkoutReturns,
+    )
+      ? sale.checkoutReturns
+      : [];
+
+    if (!sale.items.length && checkoutReturns.length === 0) {
+      throw new Error('La operación no contiene productos ni cambios/devoluciones.');
     }
 
+    // Si vuelve al stock un artículo de una venta anterior que ya no existe en
+    // inventario, se reserva antes un código corto permanente. Si la operación
+    // luego falla, ese número queda simplemente sin uso: nunca se recicla.
+    const manualReturnsToCreate = checkoutReturns.filter(
+      (credit) =>
+        credit.origin === 'legacy' &&
+        credit.returnedProductWasMissing &&
+        credit.returnedItem.returnToStock,
+    );
+
+    const allocatedShortCodes = manualReturnsToCreate.length
+      ? await allocateProductShortCodesInternal(manualReturnsToCreate.length)
+      : [];
+
+    const manualCreationByCreditId = new Map<
+      string,
+      { ref: any; shortCode: string }
+    >();
+
+    manualReturnsToCreate.forEach((credit, index) => {
+      manualCreationByCreditId.set(credit.id, {
+        ref: doc(db, COLLECTIONS.PRODUCTS, `legacy-return-${credit.id}`),
+        shortCode: allocatedShortCodes[index],
+      });
+    });
+
+    const movementRefs = new Map<string, any>();
+    checkoutReturns.forEach((credit) => {
+      if (credit.returnedItem.returnToStock) {
+        movementRefs.set(
+          credit.id,
+          doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS)),
+        );
+      }
+    });
+
     await runTransaction(db, async (transaction) => {
-      const productRefs = sale.items.map((item) =>
-        doc(db, COLLECTIONS.PRODUCTS, item.productId),
-      );
+      const productIds = new Set<string>();
 
-      // Todas las lecturas primero.
-      const productSnapshots = [];
+      sale.items.forEach((item) => {
+        if (item.productId) productIds.add(item.productId);
+      });
 
-      for (const productRef of productRefs) {
-        productSnapshots.push(await transaction.get(productRef));
+      checkoutReturns.forEach((credit) => {
+        if (
+          credit.returnedItem.returnToStock &&
+          !credit.returnedProductWasMissing &&
+          credit.returnedItem.productId
+        ) {
+          productIds.add(credit.returnedItem.productId);
+        }
+      });
+
+      const productSnapshots = new Map<string, any>();
+      for (const productId of Array.from(productIds)) {
+        const ref = doc(db, COLLECTIONS.PRODUCTS, productId);
+        const snap = await transaction.get(ref);
+        productSnapshots.set(productId, snap);
       }
 
-      const enrichedItems = sale.items.map((item, index) => {
-        const snap = productSnapshots[index];
+      const registeredSaleIds = Array.from(
+        new Set(
+          checkoutReturns
+            .filter((credit) => credit.origin === 'registered')
+            .map((credit) => String(credit.originalSaleId || '').trim())
+            .filter(Boolean),
+        ),
+      );
 
-        if (!snap.exists()) {
+      const originalSaleSnapshots = new Map<string, any>();
+      for (const saleId of registeredSaleIds) {
+        const ref = doc(db, COLLECTIONS.SALES, saleId);
+        const snap = await transaction.get(ref);
+        originalSaleSnapshots.set(saleId, snap);
+      }
+
+      // A partir de aquí no se hacen más lecturas. Todos los cambios de stock
+      // se consolidan primero y recién después se escriben.
+      const stockDeltas = new Map<string, number>();
+      const addDelta = (productId: string, delta: number) => {
+        stockDeltas.set(
+          productId,
+          Number(stockDeltas.get(productId) || 0) + delta,
+        );
+      };
+
+      const enrichedItems = sale.items.map((item) => {
+        const snap = productSnapshots.get(item.productId);
+
+        if (!snap?.exists()) {
           throw new Error(
             `El producto "${item.productName}" ya no existe en inventario.`,
           );
         }
 
         const productData = snap.data() as Product;
-        const currentStock = getNumericStock(productData.stock);
-        const requestedQuantity = Number(item.quantity);
+        const requestedQuantity = Math.floor(Number(item.quantity));
 
         if (!Number.isFinite(requestedQuantity) || requestedQuantity <= 0) {
+          throw new Error(`Cantidad inválida para "${item.productName}".`);
+        }
+
+        if (productData.active === false) {
           throw new Error(
-            `Cantidad inválida para "${item.productName}".`,
+            `El producto "${item.productName}" está inactivo y no puede venderse.`,
           );
         }
 
-        if (currentStock < requestedQuantity) {
-          throw new Error(
-            `Stock insuficiente para "${item.productName}". Disponible: ${currentStock}.`,
-          );
-        }
+        addDelta(item.productId, -requestedQuantity);
 
         return {
-          item: {
-            ...item,
-            costAtSale: Math.max(0, Number(productData.cost || 0)),
-          },
-          ref: productRefs[index],
-          newStock: currentStock - requestedQuantity,
+          ...item,
+          quantity: requestedQuantity,
+          costAtSale: Math.max(0, Number(productData.cost || 0)),
         };
       });
 
-      const saleRef = doc(db, COLLECTIONS.SALES, sale.id);
-
-      const saleToSave: Sale = {
-        ...sale,
-        items: enrichedItems.map((entry) => entry.item),
-      };
-
-      transaction.set(saleRef, cleanData(saleToSave));
-
-      enrichedItems.forEach(({ ref, newStock }) => {
-        transaction.update(ref, {
-          stock: newStock,
-          updatedAt: Date.now(),
+      const originalSaleStates = new Map<string, Sale>();
+      registeredSaleIds.forEach((saleId) => {
+        const snap = originalSaleSnapshots.get(saleId);
+        if (!snap?.exists()) {
+          throw new Error(`La venta original ${saleId} ya no existe.`);
+        }
+        originalSaleStates.set(saleId, {
+          ...(snap.data() as Sale),
+          id: snap.id,
         });
       });
+
+      const normalizedCredits: CheckoutReturnCredit[] = [];
+      const legacyAdjustmentsToSave: Array<{
+        ref: any;
+        adjustment: LegacySaleAdjustment;
+      }> = [];
+      const createdManualProducts: Array<{
+        creditId: string;
+        ref: any;
+        product: Product;
+      }> = [];
+
+      const buildEffectiveLines = (sourceSale: Sale) => {
+        const lines = new Map<string, SaleAdjustmentLine & { availableQuantity: number }>();
+
+        sourceSale.items.forEach((item, index) => {
+          const quantity = Math.max(0, Math.floor(Number(item.quantity || 0)));
+          const unitAmount =
+            quantity > 0
+              ? Math.max(0, Number(item.subtotal || 0)) / quantity
+              : Math.max(0, Number(item.priceAtSale || 0));
+          const lineId = `orig-${index}`;
+
+          lines.set(lineId, {
+            lineId,
+            productId: item.productId,
+            productName: item.productName,
+            productCode: item.productCode,
+            shortCode: item.shortCode,
+            barcode: item.barcode,
+            size: item.size,
+            color: item.color,
+            quantity,
+            availableQuantity: quantity,
+            unitAmount,
+            totalAmount: unitAmount * quantity,
+            costAtSale: item.costAtSale,
+          });
+        });
+
+        (sourceSale.adjustments || []).forEach((adjustment) => {
+          const source = lines.get(adjustment.returnedItem.sourceLineId);
+          if (source) {
+            source.availableQuantity = Math.max(
+              0,
+              source.availableQuantity -
+                Math.max(0, Number(adjustment.returnedItem.quantity || 0)),
+            );
+          }
+
+          if (adjustment.replacementItem) {
+            const replacement = adjustment.replacementItem;
+            lines.set(replacement.lineId, {
+              ...replacement,
+              availableQuantity: Math.max(0, Number(replacement.quantity || 0)),
+            });
+          }
+        });
+
+        return lines;
+      };
+
+      for (const credit of checkoutReturns) {
+        const quantity = Math.max(
+          1,
+          Math.floor(Number(credit.returnedItem.quantity || 1)),
+        );
+        const now = credit.timestamp || Date.now();
+
+        if (credit.origin === 'registered') {
+          const sourceSaleId = String(credit.originalSaleId || '').trim();
+          const sourceLineId = String(
+            credit.sourceLineId || credit.returnedItem.sourceLineId || '',
+          ).trim();
+
+          const sourceSale = originalSaleStates.get(sourceSaleId);
+          if (!sourceSale || !sourceLineId) {
+            throw new Error('No se pudo identificar la venta original de la devolución.');
+          }
+
+          const effectiveLines = buildEffectiveLines(sourceSale);
+          const sourceLine = effectiveLines.get(sourceLineId);
+
+          if (!sourceLine) {
+            throw new Error('El producto seleccionado ya no está disponible para devolución.');
+          }
+
+          if (sourceLine.availableQuantity < quantity) {
+            throw new Error(
+              `Solo quedan ${sourceLine.availableQuantity} unidad(es) disponibles para devolver de "${sourceLine.productName}".`,
+            );
+          }
+
+          const returnedUnitAmount = Math.max(0, Number(sourceLine.unitAmount || 0));
+          const returnedTotal = returnedUnitAmount * quantity;
+          const productSnap = productSnapshots.get(sourceLine.productId);
+
+          if (credit.returnedItem.returnToStock) {
+            if (!productSnap?.exists()) {
+              throw new Error(
+                `"${sourceLine.productName}" ya no existe como producto. Para reincorporarlo al stock usá la opción Venta anterior / Ya no está en Inventario.`,
+              );
+            }
+            addDelta(sourceLine.productId, quantity);
+          }
+
+          const returnedCostAtSale = Number.isFinite(Number(sourceLine.costAtSale))
+            ? Math.max(0, Number(sourceLine.costAtSale))
+            : productSnap?.exists()
+              ? Math.max(0, Number((productSnap.data() as Product).cost || 0))
+              : undefined;
+
+          const baseItemCommissions = Array.isArray(sourceSale.commissionBaseItemAmounts)
+            ? sourceSale.commissionBaseItemAmounts.map((value) =>
+                Math.max(0, Number(value || 0)),
+              )
+            : sourceSale.items.map((item) =>
+                Math.max(0, Number(item.commissionAmount || 0)),
+              );
+
+          const baseCommission = Number.isFinite(Number(sourceSale.commissionBaseAmount))
+            ? Math.max(0, Number(sourceSale.commissionBaseAmount))
+            : baseItemCommissions.reduce((sum, value) => sum + value, 0);
+
+          const commissionRate = Number(sourceSale.total || 0) > 0
+            ? baseCommission / Number(sourceSale.total || 0)
+            : 0;
+
+          const difference = -returnedTotal;
+          const commissionAdjustment = difference * commissionRate;
+          const previousCommissionAdjustment = Number(
+            sourceSale.commissionAdjustmentTotal || 0,
+          );
+          const nextCommissionAdjustment =
+            previousCommissionAdjustment + commissionAdjustment;
+          const targetCommission = Math.max(
+            0,
+            baseCommission + nextCommissionAdjustment,
+          );
+
+          let adjustedItems = sourceSale.items;
+          if (baseCommission > 0 && sourceSale.items.length > 0) {
+            let accumulated = 0;
+            adjustedItems = sourceSale.items.map((item, index) => {
+              let amount = 0;
+              if (index === sourceSale.items.length - 1) {
+                amount = Math.max(0, targetCommission - accumulated);
+              } else {
+                const baseItem = Math.max(
+                  0,
+                  Number(baseItemCommissions[index] || 0),
+                );
+                amount = targetCommission * (baseItem / baseCommission);
+                accumulated += amount;
+              }
+              return { ...item, commissionAmount: amount };
+            });
+          }
+
+          const adjustment: SaleAdjustment = {
+            id: `pos-${credit.id}`,
+            type: 'return',
+            timestamp: now,
+            returnedItem: {
+              lineId: `pos-${credit.id}-returned`,
+              sourceLineId,
+              productId: sourceLine.productId,
+              productName: sourceLine.productName,
+              productCode: sourceLine.productCode,
+              shortCode: sourceLine.shortCode,
+              barcode: sourceLine.barcode,
+              size: sourceLine.size,
+              color: sourceLine.color,
+              quantity,
+              unitAmount: returnedUnitAmount,
+              totalAmount: returnedTotal,
+              costAtSale: returnedCostAtSale,
+              returnToStock: Boolean(credit.returnedItem.returnToStock),
+            },
+            difference,
+            settlement: {
+              direction: 'none',
+              amount: 0,
+            },
+            notes: [
+              `Crédito aplicado en Caja a la operación ${sale.id}.`,
+              credit.notes,
+            ]
+              .filter(Boolean)
+              .join(' '),
+            recordedByUserId: sale.recordedByUserId || sale.userId,
+            recordedByUserName: sale.recordedByUserName || sale.userName,
+            commissionAdjustment,
+            commissionWasAlreadyPaid: Boolean(sourceSale.commissionPaid),
+          };
+
+          const nextSourceSale: Sale = {
+            ...sourceSale,
+            items: adjustedItems,
+            adjustments: [...(sourceSale.adjustments || []), adjustment],
+            commissionBaseAmount: baseCommission,
+            commissionBaseItemAmounts: baseItemCommissions,
+            commissionAdjustmentTotal: nextCommissionAdjustment,
+          };
+          originalSaleStates.set(sourceSaleId, nextSourceSale);
+
+          normalizedCredits.push({
+            ...credit,
+            originalPaidAmount: returnedTotal,
+            sourceLineId,
+            returnedItem: adjustment.returnedItem,
+          });
+          continue;
+        }
+
+        // Venta anterior a INVICTOS.
+        const originalUnitAmount = Math.max(
+          0,
+          Number(credit.returnedItem.unitAmount || 0),
+        );
+        if (originalUnitAmount <= 0) {
+          throw new Error('Ingresá el valor reconocido por el producto devuelto.');
+        }
+
+        const returnedTotal = originalUnitAmount * quantity;
+        let returnedItem = {
+          ...credit.returnedItem,
+          quantity,
+          unitAmount: originalUnitAmount,
+          totalAmount: returnedTotal,
+        };
+        let returnedProductCreatedInInventory = false;
+
+        if (credit.returnedProductWasMissing) {
+          const manual = credit.manualReturnedProduct;
+          const manualName = String(manual?.name || returnedItem.productName || '').trim();
+          if (!manualName) {
+            throw new Error('Ingresá una descripción del producto devuelto.');
+          }
+
+          if (returnedItem.returnToStock) {
+            const creation = manualCreationByCreditId.get(credit.id);
+            if (!creation) {
+              throw new Error('No se pudo reservar el código del producto reincorporado.');
+            }
+
+            const resalePrice = Math.max(0, Number(manual?.resalePrice || 0));
+            if (resalePrice <= 0) {
+              throw new Error(
+                `Ingresá el precio actual de venta para reincorporar "${manualName}" al stock.`,
+              );
+            }
+
+            const recreatedProduct: Product = {
+              id: creation.ref.id,
+              code: `LEG-${creation.ref.id.slice(-8).toUpperCase()}`,
+              shortCode: creation.shortCode,
+              name: manualName,
+              category: String(manual?.category || '').trim() || 'Sin categoría',
+              provider: String(manual?.provider || '').trim() || 'Sin proveedor',
+              price: resalePrice,
+              cost: Math.max(0, Number(manual?.cost || 0)),
+              stock: quantity,
+              size: String(manual?.size || returnedItem.size || '').trim() || undefined,
+              color: String(manual?.color || returnedItem.color || '').trim() || undefined,
+              description:
+                'Producto reincorporado por cambio/devolución de una venta anterior a INVICTOS.',
+              minStock: 0,
+              active: true,
+              createdAt: now,
+              updatedAt: now,
+            };
+
+            createdManualProducts.push({
+              creditId: credit.id,
+              ref: creation.ref,
+              product: recreatedProduct,
+            });
+            returnedProductCreatedInInventory = true;
+            returnedItem = {
+              ...returnedItem,
+              productId: recreatedProduct.id,
+              productName: recreatedProduct.name,
+              productCode: recreatedProduct.code,
+              shortCode: recreatedProduct.shortCode,
+              size: recreatedProduct.size,
+              color: recreatedProduct.color,
+              costAtSale: recreatedProduct.cost,
+            };
+          }
+        } else if (returnedItem.returnToStock) {
+          const snap = productSnapshots.get(returnedItem.productId);
+          if (!snap?.exists()) {
+            throw new Error(
+              `El producto "${returnedItem.productName}" ya no existe. Elegí “Ya no está en Inventario”.`,
+            );
+          }
+          addDelta(returnedItem.productId, quantity);
+          const product = snap.data() as Product;
+          returnedItem = {
+            ...returnedItem,
+            productName: product.name || returnedItem.productName,
+            productCode: product.code,
+            shortCode: product.shortCode,
+            barcode: product.barcode,
+            size: product.size,
+            color: product.color,
+            costAtSale: Math.max(0, Number(product.cost || 0)),
+          };
+        }
+
+        const legacyRef = doc(
+          db,
+          COLLECTIONS.LEGACY_SALE_ADJUSTMENTS,
+          `pos-${credit.id}`,
+        );
+        const legacyAdjustment: LegacySaleAdjustment = {
+          id: legacyRef.id,
+          type: 'return',
+          timestamp: now,
+          originalSaleDate: credit.originalSaleDate,
+          customerName: credit.customerName?.trim() || undefined,
+          returnedItem: {
+            ...returnedItem,
+            lineId: `${legacyRef.id}-returned`,
+            sourceLineId: `legacy-${legacyRef.id}`,
+          },
+          originalPaidAmount: returnedTotal,
+          difference: -returnedTotal,
+          settlement: {
+            direction: 'none',
+            amount: 0,
+          },
+          notes: [
+            `Crédito aplicado en Caja a la operación ${sale.id}.`,
+            credit.notes,
+          ]
+            .filter(Boolean)
+            .join(' '),
+          recordedByUserId: sale.recordedByUserId || sale.userId,
+          recordedByUserName: sale.recordedByUserName || sale.userName,
+          returnedProductWasMissing: Boolean(credit.returnedProductWasMissing),
+          returnedProductCreatedInInventory,
+          returnedProductOriginalReference:
+            credit.returnedProductOriginalReference || undefined,
+          commissionAdjustment: 0,
+        };
+
+        legacyAdjustmentsToSave.push({ ref: legacyRef, adjustment: legacyAdjustment });
+        normalizedCredits.push({
+          ...credit,
+          originalPaidAmount: returnedTotal,
+          returnedItem: legacyAdjustment.returnedItem,
+        });
+      }
+
+      // Validar el stock final considerando simultáneamente lo que vuelve y lo
+      // que se vende. Esto permite, por ejemplo, recibir una unidad y vender otra
+      // del mismo SKU dentro de la misma operación.
+      for (const [productId, delta] of Array.from(stockDeltas.entries())) {
+        const snap = productSnapshots.get(productId);
+        if (!snap?.exists()) {
+          throw new Error('Uno de los productos de la operación ya no existe.');
+        }
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+        const nextStock = currentStock + delta;
+        if (nextStock < 0) {
+          throw new Error(
+            `Stock insuficiente para "${product.name || 'Producto'}". Disponible: ${currentStock}.`,
+          );
+        }
+      }
+
+      const positiveTotal = enrichedItems.reduce(
+        (sum, item) => sum + Math.max(0, Number(item.subtotal || 0)),
+        0,
+      );
+      const grossSubtotal = enrichedItems.reduce(
+        (sum, item) =>
+          sum +
+          Math.max(
+            0,
+            Number(
+              item.originalSubtotal ??
+                Number(item.priceAtSale || 0) * Number(item.quantity || 0),
+            ),
+          ),
+        0,
+      );
+      const discountTotal = enrichedItems.reduce(
+        (sum, item) => sum + Math.max(0, Number(item.discountAmount || 0)),
+        0,
+      );
+      const returnCreditTotal = normalizedCredits.reduce(
+        (sum, credit) => sum + Math.max(0, Number(credit.originalPaidAmount || 0)),
+        0,
+      );
+      const settlementTotal = positiveTotal - returnCreditTotal;
+
+      const paymentTotal = (sale.payments || []).reduce(
+        (sum, payment) => sum + Math.max(0, Number(payment.amount || 0)),
+        0,
+      );
+
+      if (settlementTotal > 0.009 && Math.abs(paymentTotal - settlementTotal) > 0.02) {
+        throw new Error(
+          `Las formas de pago deben sumar $${settlementTotal.toLocaleString('es-AR')}.`,
+        );
+      }
+
+      if (settlementTotal < -0.009 && !sale.refundMethod) {
+        throw new Error('Seleccioná cómo se devolverá la diferencia al cliente.');
+      }
+
+      const saleRef = doc(db, COLLECTIONS.SALES, sale.id);
+      const saleToSave: Sale = {
+        ...sale,
+        items: enrichedItems,
+        subtotal: grossSubtotal,
+        discount: discountTotal,
+        total: positiveTotal,
+        checkoutReturns: normalizedCredits,
+        returnCreditTotal,
+        settlementTotal,
+        settlementDirection:
+          Math.abs(settlementTotal) < 0.01
+            ? 'none'
+            : settlementTotal > 0
+              ? 'charge'
+              : 'refund',
+        payments: settlementTotal > 0 ? sale.payments || [] : [],
+      };
+
+      // Aplicar stocks de productos ya existentes.
+      for (const [productId, delta] of Array.from(stockDeltas.entries())) {
+        if (Math.abs(delta) < 0.0001) continue;
+        const snap = productSnapshots.get(productId);
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+        const nextStock = currentStock + delta;
+        transaction.update(doc(db, COLLECTIONS.PRODUCTS, productId), {
+          stock: nextStock,
+          ...(delta > 0
+            ? {
+                active: true,
+                reactivatedAt: Date.now(),
+                reactivatedByUserId: sale.recordedByUserId || sale.userId,
+                reactivatedByUserName: sale.recordedByUserName || sale.userName,
+              }
+            : {}),
+          updatedAt: Date.now(),
+        });
+      }
+
+      // Reincorporaciones manuales que no existían en inventario.
+      createdManualProducts.forEach(({ ref, product }) => {
+        transaction.set(ref, cleanData(product));
+      });
+
+      // Ajustar las ventas originales registradas en INVICTOS.
+      originalSaleStates.forEach((sourceSale, sourceSaleId) => {
+        transaction.update(
+          doc(db, COLLECTIONS.SALES, sourceSaleId),
+          cleanData({
+            items: sourceSale.items,
+            adjustments: sourceSale.adjustments || [],
+            commissionBaseAmount: sourceSale.commissionBaseAmount,
+            commissionBaseItemAmounts: sourceSale.commissionBaseItemAmounts,
+            commissionAdjustmentTotal: sourceSale.commissionAdjustmentTotal,
+          }),
+        );
+      });
+
+      // Registrar devoluciones de ventas anteriores al sistema.
+      legacyAdjustmentsToSave.forEach(({ ref, adjustment }) => {
+        transaction.set(ref, cleanData(adjustment));
+      });
+
+      // Trazabilidad de reingresos de stock.
+      normalizedCredits.forEach((credit) => {
+        if (!credit.returnedItem.returnToStock) return;
+        const movementRef = movementRefs.get(credit.id);
+        if (!movementRef) return;
+
+        const created = createdManualProducts.find(
+          (entry) => entry.creditId === credit.id,
+        );
+
+        if (created) {
+          transaction.set(
+            movementRef,
+            cleanData({
+              id: movementRef.id,
+              productId: created.product.id,
+              productName: created.product.name,
+              productCode: created.product.code,
+              size: created.product.size,
+              color: created.product.color,
+              type: 'RETURN',
+              quantityChange: credit.returnedItem.quantity,
+              previousStock: 0,
+              newStock: credit.returnedItem.quantity,
+              timestamp: credit.timestamp || Date.now(),
+              userId: sale.recordedByUserId || sale.userId,
+              userName: sale.recordedByUserName || sale.userName,
+              referenceId: `checkout:${sale.id}:${credit.id}`,
+              note: 'Reincorporación por cambio/devolución procesado en Caja.',
+              unitCost: created.product.cost,
+            }),
+          );
+          return;
+        }
+
+        const snap = productSnapshots.get(credit.returnedItem.productId);
+        if (!snap?.exists()) return;
+        const product = snap.data() as Product;
+        const currentStock = getNumericStock(product.stock);
+        transaction.set(
+          movementRef,
+          cleanData({
+            id: movementRef.id,
+            productId: credit.returnedItem.productId,
+            productName: credit.returnedItem.productName,
+            productCode: credit.returnedItem.productCode || product.code || '',
+            barcode: credit.returnedItem.barcode || product.barcode,
+            size: credit.returnedItem.size || product.size,
+            color: credit.returnedItem.color || product.color,
+            type: 'RETURN',
+            quantityChange: credit.returnedItem.quantity,
+            previousStock: currentStock,
+            newStock: currentStock + credit.returnedItem.quantity,
+            timestamp: credit.timestamp || Date.now(),
+            userId: sale.recordedByUserId || sale.userId,
+            userName: sale.recordedByUserName || sale.userName,
+            referenceId: `checkout:${sale.id}:${credit.id}`,
+            note: 'Reingreso por cambio/devolución procesado en Caja.',
+            unitCost: credit.returnedItem.costAtSale,
+          }),
+        );
+      });
+
+      transaction.set(saleRef, cleanData(saleToSave));
     });
   },
 
@@ -1960,6 +2754,14 @@ export const StorageService = {
           doc(db, COLLECTIONS.PRODUCTS, productId),
           {
             stock: currentStock + delta,
+            ...(delta > 0
+              ? {
+                  active: true,
+                  reactivatedAt: now,
+                  reactivatedByUserId: input.userId,
+                  reactivatedByUserName: input.userName,
+                }
+              : {}),
             updatedAt: now,
           },
         );
@@ -2088,6 +2890,10 @@ export const StorageService = {
       source === 'manual' && input.returnToStock
         ? doc(collection(db, COLLECTIONS.PRODUCTS))
         : null;
+
+    const recreatedReturnedShortCode = recreatedReturnedProductRef
+      ? (await allocateProductShortCodesInternal(1))[0]
+      : undefined;
 
     const returnMovementRef = input.returnToStock
       ? doc(collection(db, COLLECTIONS.INVENTORY_MOVEMENTS))
@@ -2229,6 +3035,7 @@ export const StorageService = {
         returnedProductCode = recreatedReturnedProductRef
           ? `LEG-${recreatedReturnedProductRef.id.slice(0, 8).toUpperCase()}`
           : String(input.manualReturnedProduct?.referenceCode || '').trim() || undefined;
+        returnedShortCode = recreatedReturnedShortCode;
         returnedSize = String(input.manualReturnedProduct?.size || '').trim() || undefined;
         returnedColor = String(input.manualReturnedProduct?.color || '').trim() || undefined;
         returnedCurrentCost = manualCost;
@@ -2295,6 +3102,7 @@ export const StorageService = {
         const recreatedProduct: Product = {
           id: recreatedReturnedProductRef.id,
           code: returnedProductCode || `LEG-${recreatedReturnedProductRef.id.slice(0, 8).toUpperCase()}`,
+          shortCode: recreatedReturnedShortCode,
           name: manualName,
           category:
             String(input.manualReturnedProduct?.category || '').trim() ||
@@ -2427,6 +3235,14 @@ export const StorageService = {
 
         transaction.update(ref, {
           stock: currentStock + delta,
+          ...(delta > 0
+            ? {
+                active: true,
+                reactivatedAt: now,
+                reactivatedByUserId: input.userId,
+                reactivatedByUserName: input.userName,
+              }
+            : {}),
           updatedAt: now,
         });
       }
