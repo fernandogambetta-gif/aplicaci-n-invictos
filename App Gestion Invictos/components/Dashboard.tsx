@@ -28,6 +28,65 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
 
   const isAdmin = currentUser.role === 'admin';
 
+  // Importe económico de una venta considerando devoluciones registradas.
+  // Las devoluciones de ventas INVICTOS impactan en la venta original mediante
+  // adjustments; las ventas anteriores al sistema se descuentan de la operación
+  // actual porque no existe una venta histórica dentro de INVICTOS.
+  const saleEffectiveRevenue = (sale: Sale): number => {
+    const adjustmentDifference = (sale.adjustments || []).reduce(
+      (sum, adjustment) => sum + Number(adjustment.difference || 0),
+      0,
+    );
+
+    const legacyCheckoutCredits = (sale.checkoutReturns || [])
+      .filter((credit) => credit.origin === 'legacy')
+      .reduce(
+        (sum, credit) => sum + Math.max(0, Number(credit.originalPaidAmount || 0)),
+        0,
+      );
+
+    return Number(sale.total || 0) + adjustmentDifference - legacyCheckoutCredits;
+  };
+
+  const saleEffectiveCost = (sale: Sale): number => {
+    let cost = 0;
+
+    (sale.items || []).forEach((item) => {
+      const historical = Number(item.costAtSale);
+      if (Number.isFinite(historical) && historical >= 0) {
+        cost += historical * Number(item.quantity || 0);
+        return;
+      }
+
+      const product = products.find((p) => p.id === item.productId);
+      cost += Math.max(0, Number(product?.cost || 0)) * Number(item.quantity || 0);
+    });
+
+    (sale.adjustments || []).forEach((adjustment) => {
+      if (adjustment.returnedItem.returnToStock) {
+        cost -=
+          Math.max(0, Number(adjustment.returnedItem.costAtSale || 0)) *
+          Math.max(0, Number(adjustment.returnedItem.quantity || 0));
+      }
+
+      if (adjustment.replacementItem) {
+        cost +=
+          Math.max(0, Number(adjustment.replacementItem.costAtSale || 0)) *
+          Math.max(0, Number(adjustment.replacementItem.quantity || 0));
+      }
+    });
+
+    (sale.checkoutReturns || [])
+      .filter((credit) => credit.origin === 'legacy' && credit.returnedItem.returnToStock)
+      .forEach((credit) => {
+        cost -=
+          Math.max(0, Number(credit.returnedItem.costAtSale || 0)) *
+          Math.max(0, Number(credit.returnedItem.quantity || 0));
+      });
+
+    return cost;
+  };
+
   // --- FILTERING LOGIC (Role Based) ---
   const roleFilteredSales = useMemo(() => {
      if (!Array.isArray(sales)) return [];
@@ -60,7 +119,7 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
 
   // --- STATS CALCULATION ---
   const stats = useMemo(() => {
-    const totalRevenue = filteredSales.reduce((acc, s) => acc + (s.total || 0), 0);
+    const totalRevenue = filteredSales.reduce((acc, s) => acc + saleEffectiveRevenue(s), 0);
     const totalSalesCount = filteredSales.length;
     // Defensive check: ensure s.items exists
     const totalItemsSold = filteredSales.reduce((acc, s) => acc + (s.items || []).reduce((sum, i) => sum + (i.quantity || 0), 0), 0);
@@ -69,17 +128,10 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
     
     // Only calculate profit for admin
     if (isAdmin) {
-        let totalCost = 0;
-        filteredSales.forEach(sale => {
-            if (Array.isArray(sale.items)) {
-                sale.items.forEach(item => {
-                    const product = products.find(p => p.id === item.productId);
-                    if (product) {
-                        totalCost += (product.cost || 0) * (item.quantity || 0);
-                    }
-                });
-            }
-        });
+        const totalCost = filteredSales.reduce(
+          (sum, sale) => sum + saleEffectiveCost(sale),
+          0,
+        );
         grossProfit = totalRevenue - totalCost;
     }
 
@@ -96,7 +148,7 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
       if (!sellerMap[userId]) {
         sellerMap[userId] = { name: sale.userName || 'Desconocido', total: 0, count: 0, items: 0 };
       }
-      sellerMap[userId].total += (sale.total || 0);
+      sellerMap[userId].total += saleEffectiveRevenue(sale);
       sellerMap[userId].count += 1;
       if (Array.isArray(sale.items)) {
           sellerMap[userId].items += sale.items.reduce((acc, i) => acc + (i.quantity || 0), 0);
@@ -146,7 +198,7 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
         else if (timeRange === 'year') key = date.toLocaleDateString('es-ES', { month: 'short' });
         else key = date.toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit' });
         
-        grouped[key] = (grouped[key] || 0) + (sale.total || 0);
+        grouped[key] = (grouped[key] || 0) + saleEffectiveRevenue(sale);
     });
 
     return Object.entries(grouped).map(([name, value]) => ({ name, value }));
