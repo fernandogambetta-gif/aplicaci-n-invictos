@@ -11,6 +11,7 @@ import {
   SalePaymentMethod,
   PaymentAllocation,
   ReceivableInstallment,
+  CheckoutReturnCredit,
 } from '../types';
 import {
   ShoppingCart,
@@ -37,11 +38,14 @@ import {
   Megaphone,
   CalendarClock,
   UserRound,
+  ArrowLeftRight,
+  RotateCcw,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import VariantLookupModal from './VariantLookupModal';
 import SaleReceiptModal from './SaleReceiptModal';
+import POSReturnCreditModal from './POSReturnCreditModal';
 
 interface POSProps {
   products: Product[];
@@ -60,6 +64,11 @@ const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 
 const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const [cart, setCart] = useState<SaleItem[]>([]);
+  const [checkoutReturns, setCheckoutReturns] = useState<CheckoutReturnCredit[]>([]);
+  const [addChoiceOpen, setAddChoiceOpen] = useState(false);
+  const [returnCreditModalOpen, setReturnCreditModalOpen] = useState(false);
+  const [refundMethod, setRefundMethod] = useState<Exclude<PaymentMethod, 'account'>>('cash');
+  const [refundReceiptNumber, setRefundReceiptNumber] = useState('');
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
 
@@ -368,15 +377,39 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
   const closeProductPicker = () => {
     setProductPickerOpen(false);
+    setAddChoiceOpen(false);
     setProductSearch('');
     setLetterFilter('ALL');
   };
 
+  const returnedStockForProduct = (productId: string): number =>
+    checkoutReturns.reduce(
+      (sum, credit) =>
+        credit.returnedItem.returnToStock && credit.returnedItem.productId === productId
+          ? sum + Math.max(0, Number(credit.returnedItem.quantity || 0))
+          : sum,
+      0,
+    );
+
+  const addReturnCredit = (credit: CheckoutReturnCredit) => {
+    setCheckoutError('');
+    setCheckoutReturns((prev) => [...prev, credit]);
+    setAddChoiceOpen(false);
+    setReturnCreditModalOpen(false);
+    showTemporarySuccess(`${credit.returnedItem.productName} agregado como cambio/devolución`);
+  };
+
+  const removeReturnCredit = (id: string) => {
+    setCheckoutError('');
+    setCheckoutReturns((prev) => prev.filter((credit) => credit.id !== id));
+  };
+
   const addToCart = (product: Product) => {
     const stock = toNumber(product.stock, 0);
+    const availableStock = stock + returnedStockForProduct(product.id);
     const price = toNumber(product.price, 0);
 
-    if (stock <= 0) {
+    if (availableStock <= 0) {
       setCheckoutError(`${product.name} no tiene stock disponible.`);
       return;
     }
@@ -397,7 +430,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       );
 
       if (existing) {
-        if (existing.quantity >= stock) {
+        if (existing.quantity >= availableStock) {
           return prev;
         }
 
@@ -507,17 +540,20 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   };
 
   const clearCart = () => {
-    if (!cart.length) return;
+    if (!cart.length && !checkoutReturns.length) return;
 
-    if (!confirm('¿Vaciar todos los productos de la venta?')) {
+    if (!confirm('¿Vaciar todos los productos y cambios/devoluciones de la operación?')) {
       return;
     }
 
     setCart([]);
+    setCheckoutReturns([]);
     setMixedPayments({
       cash: '',
+      debit: '',
       card: '',
       transfer: '',
+      account: '',
     });
     setCheckoutError('');
   };
@@ -536,8 +572,8 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           (p) => p.id === productId,
         );
         const maxStock = product
-          ? toNumber(product.stock, 0)
-          : 0;
+          ? toNumber(product.stock, 0) + returnedStockForProduct(productId)
+          : returnedStockForProduct(productId);
 
         const newQuantity = item.quantity + delta;
 
@@ -618,6 +654,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     0,
   );
 
+  const returnCreditTotal = checkoutReturns.reduce(
+    (acc, credit) => acc + Math.max(0, Number(credit.originalPaidAmount || credit.returnedItem.totalAmount || 0)),
+    0,
+  );
+
+  const checkoutTotal = finalTotal - returnCreditTotal;
+
   const totalUnits = cart.reduce(
     (acc, item) =>
       acc + toNumber(item.quantity, 0),
@@ -674,14 +717,14 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   );
 
   const paymentDifference =
-    finalTotal - mixedAssigned;
+    checkoutTotal - mixedAssigned;
 
   const mixedPaymentValid =
     Math.abs(paymentDifference) < 0.01;
 
   const accountAmount =
     paymentMethod === 'account'
-      ? finalTotal
+      ? Math.max(0, checkoutTotal)
       : paymentMethod === 'mixed'
         ? Math.max(
             0,
@@ -788,7 +831,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
     const remaining = Math.max(
       0,
-      finalTotal - others,
+      checkoutTotal - others,
     );
 
     setMixedPayments((prev) => ({
@@ -802,6 +845,8 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
   const getPaymentsForSale =
     (): PaymentAllocation[] => {
+      if (checkoutTotal <= 0) return [];
+
       if (paymentMethod === 'mixed') {
         return parsedMixedPayments;
       }
@@ -809,7 +854,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       return [
         {
           method: paymentMethod,
-          amount: finalTotal,
+          amount: checkoutTotal,
           receiptNumber:
             paymentMethod === 'debit'
               ? paymentReferences.debit.trim() || undefined
@@ -821,16 +866,14 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     };
 
   const handleCheckout = async () => {
-    if (
-      cart.length === 0 ||
-      finalTotal <= 0
-    ) {
+    if (cart.length === 0 && checkoutReturns.length === 0) {
       return;
     }
 
     setCheckoutError('');
 
     if (
+      checkoutTotal > 0 &&
       paymentMethod === 'mixed' &&
       !mixedPaymentValid
     ) {
@@ -910,14 +953,29 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         configRate,
       );
 
-      const itemsWithCommission = cart.map(
-        (item) => ({
-          ...item,
-          commissionAmount:
-            toNumber(item.subtotal, 0) *
-            (userRate / 100),
-        }),
-      );
+      const legacyCreditForCommission = checkoutReturns
+        .filter((credit) => credit.origin === 'legacy')
+        .reduce((sum, credit) => sum + Math.max(0, Number(credit.originalPaidAmount || 0)), 0);
+
+      const commissionableNewAmount = Math.max(0, finalTotal - legacyCreditForCommission);
+      const targetNewCommission = commissionableNewAmount * (userRate / 100);
+      let allocatedCommission = 0;
+
+      const itemsWithCommission = cart.map((item, index) => {
+        const lineTotal = Math.max(0, toNumber(item.subtotal, 0));
+        let commissionAmount = 0;
+
+        if (finalTotal > 0 && targetNewCommission > 0) {
+          if (index === cart.length - 1) {
+            commissionAmount = Math.max(0, targetNewCommission - allocatedCommission);
+          } else {
+            commissionAmount = targetNewCommission * (lineTotal / finalTotal);
+            allocatedCommission += commissionAmount;
+          }
+        }
+
+        return { ...item, commissionAmount };
+      });
 
       const saleId = Date.now().toString();
 
@@ -968,6 +1026,27 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         payments: getPaymentsForSale(),
         receivable,
 
+        checkoutReturns,
+        returnCreditTotal,
+        settlementTotal: checkoutTotal,
+        settlementDirection:
+          Math.abs(checkoutTotal) < 0.01
+            ? 'none'
+            : checkoutTotal > 0
+              ? 'charge'
+              : 'refund',
+        refundMethod: checkoutTotal < -0.009 ? refundMethod : undefined,
+        refundReceiptNumber:
+          checkoutTotal < -0.009 && (refundMethod === 'debit' || refundMethod === 'card')
+            ? refundReceiptNumber.trim() || undefined
+            : undefined,
+        operationType:
+          checkoutReturns.length === 0
+            ? 'sale'
+            : cart.length === 0
+              ? 'return_only'
+              : 'sale_with_return',
+
         // Usuario que realizó la venta.
         userId: effectiveSaleUser.id,
         userName: effectiveSaleUser.name,
@@ -985,6 +1064,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       setIsReceiptOpen(true);
 
       setCart([]);
+      setCheckoutReturns([]);
+      setRefundMethod('cash');
+      setRefundReceiptNumber('');
       setPaymentMethod('cash');
       setMixedPayments({
         cash: '',
@@ -1013,7 +1095,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       await onSaleComplete();
 
       setSuccessMsg(
-        'Venta registrada correctamente.',
+        checkoutReturns.length > 0
+          ? 'Operación de venta/cambio/devolución registrada correctamente.'
+          : 'Venta registrada correctamente.',
       );
 
       window.setTimeout(
@@ -1041,6 +1125,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       .toLowerCase();
 
     return products
+      .filter((product) =>
+        product.active !== false || returnedStockForProduct(product.id) > 0,
+      )
       .filter((product) => {
         const matchesCategory =
           selectedCategory === 'ALL' ||
@@ -1087,6 +1174,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       );
   }, [
     products,
+    checkoutReturns,
     productSearch,
     letterFilter,
     selectedCategory,
@@ -1108,11 +1196,11 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         <div>
           <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
             <ShoppingCart size={25} />
-            Nueva venta
+            Venta / Cambio / Devolución
           </h2>
 
           <p className="text-sm text-slate-500 mt-1">
-            La venta se arma por filas. Seleccioná, buscá o escaneá cada producto.
+            Podés combinar productos nuevos con uno o más cambios/devoluciones en la misma operación.
           </p>
         </div>
 
@@ -1122,7 +1210,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               Productos
             </div>
             <div className="font-bold text-slate-800">
-              {cart.length}
+              {cart.length + checkoutReturns.length}
             </div>
           </div>
 
@@ -1137,10 +1225,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
           <div className="bg-indigo-50 border border-indigo-200 rounded-xl px-4 py-2 min-w-[150px]">
             <div className="text-[10px] uppercase font-semibold text-indigo-500">
-              Total actual
+              {checkoutTotal >= 0 ? 'A cobrar' : 'A devolver'}
             </div>
             <div className="text-xl font-bold text-indigo-700">
-              ${formatMoney(finalTotal)}
+              ${formatMoney(Math.abs(checkoutTotal))}
             </div>
           </div>
         </div>
@@ -1282,7 +1370,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
             <div className="font-bold text-slate-800">
-              Detalle de la venta
+              Detalle de la operación
             </div>
             <div className="text-xs text-slate-500">
               Vendedor: {effectiveSaleUser.name}
@@ -1317,13 +1405,13 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               Escanear
             </button>
 
-            {cart.length > 0 && (
+            {(cart.length > 0 || checkoutReturns.length > 0) && (
               <button
                 type="button"
                 onClick={clearCart}
                 className="text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg text-sm font-semibold"
               >
-                Vaciar venta
+                Vaciar operación
               </button>
             )}
           </div>
@@ -1530,16 +1618,53 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                 );
               })}
 
+              {checkoutReturns.map((credit) => (
+                <tr key={credit.id} className="bg-amber-50/70">
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-amber-900 flex items-center gap-2">
+                      <RotateCcw size={16} />
+                      DEVUELVE · {credit.returnedItem.productName}
+                    </div>
+                    <div className="text-xs text-amber-700 mt-1">
+                      {credit.origin === 'registered'
+                        ? `Venta ${credit.originalSaleId?.slice(-8) || ''}`
+                        : 'Venta anterior a INVICTOS'}
+                      {credit.returnedItem.shortCode ? ` · QR ${credit.returnedItem.shortCode}` : ''}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-sm text-amber-800">
+                    {[credit.returnedItem.size ? `T. ${credit.returnedItem.size}` : '', credit.returnedItem.color].filter(Boolean).join(' · ') || '—'}
+                  </td>
+                  <td className="px-4 py-3 text-right text-sm text-amber-800">
+                    ${formatMoney(credit.returnedItem.unitAmount)}
+                  </td>
+                  <td className="px-4 py-3 text-center font-semibold text-amber-900">
+                    {credit.returnedItem.quantity}
+                  </td>
+                  <td className="px-4 py-3 text-xs text-amber-700">
+                    {credit.returnedItem.returnToStock ? 'Vuelve al stock' : 'No vuelve al stock'}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="font-bold text-amber-800">−${formatMoney(credit.originalPaidAmount)}</div>
+                    <div className="text-[11px] text-amber-600">crédito aplicado</div>
+                  </td>
+                  <td className="px-2 py-3 text-center">
+                    <button type="button" onClick={() => removeReturnCredit(credit.id)} title="Quitar cambio/devolución" className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg">
+                      <Trash size={17} />
+                    </button>
+                  </td>
+                </tr>
+              ))}
+
               {/* FILA PARA AGREGAR EL SIGUIENTE PRODUCTO */}
               <tr className="bg-slate-50/70">
                 <td colSpan={7} className="p-0">
                   <button
                     type="button"
-                    onClick={() =>
-                      setProductPickerOpen(
-                        (prev) => !prev,
-                      )
-                    }
+                    onClick={() => {
+                      setAddChoiceOpen((prev) => !prev);
+                      setProductPickerOpen(false);
+                    }}
                     className="w-full px-4 py-4 flex items-center justify-between gap-3 text-left hover:bg-indigo-50 transition-colors"
                   >
                     <div className="flex items-center gap-3">
@@ -1549,15 +1674,15 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
                       <div>
                         <div className="font-semibold text-indigo-700">
-                          + Agregar otro producto
+                          + Agregar a la operación
                         </div>
                         <div className="text-xs text-slate-500 mt-0.5">
-                          Hacé clic para buscar por nombre, primera letra, SKU o código de barras.
+                          Elegí producto nuevo o cambio/devolución.
                         </div>
                       </div>
                     </div>
 
-                    {productPickerOpen ? (
+                    {addChoiceOpen ? (
                       <ChevronUp
                         size={19}
                         className="text-slate-400"
@@ -1571,6 +1696,44 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                   </button>
                 </td>
               </tr>
+
+              {addChoiceOpen && (
+                <tr>
+                  <td colSpan={7} className="p-0 border-t border-indigo-100">
+                    <div className="p-4 bg-slate-50 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setProductPickerOpen(true);
+                          setAddChoiceOpen(false);
+                        }}
+                        className="rounded-xl border border-indigo-200 bg-white hover:bg-indigo-50 p-4 text-left flex items-start gap-3"
+                      >
+                        <div className="w-10 h-10 rounded-lg bg-indigo-100 text-indigo-700 flex items-center justify-center shrink-0"><PackagePlus size={20} /></div>
+                        <div>
+                          <div className="font-bold text-indigo-800">Producto nuevo</div>
+                          <div className="text-xs text-slate-500 mt-1">Agregar una compra normal al carrito.</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setReturnCreditModalOpen(true);
+                          setAddChoiceOpen(false);
+                        }}
+                        className="rounded-xl border border-amber-200 bg-white hover:bg-amber-50 p-4 text-left flex items-start gap-3"
+                      >
+                        <div className="w-10 h-10 rounded-lg bg-amber-100 text-amber-700 flex items-center justify-center shrink-0"><ArrowLeftRight size={20} /></div>
+                        <div>
+                          <div className="font-bold text-amber-800">Cambio / Devolución</div>
+                          <div className="text-xs text-slate-500 mt-1">Agregar el producto que vuelve y descontar su valor del total.</div>
+                        </div>
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
 
               {productPickerOpen && (
                 <tr>
@@ -1715,13 +1878,15 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                                       product.stock,
                                       0,
                                     );
+                                  const availableStock =
+                                    stock + returnedStockForProduct(product.id);
                                   const price =
                                     toNumber(
                                       product.price,
                                       0,
                                     );
                                   const disabled =
-                                    stock <= 0 ||
+                                    availableStock <= 0 ||
                                     price <= 0;
 
                                   return (
@@ -1811,9 +1976,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                                       <td className="px-3 py-2.5 text-center">
                                         <span
                                           className={`inline-flex px-2 py-1 rounded text-xs font-semibold ${
-                                            stock <= 0
+                                            availableStock <= 0
                                               ? 'bg-red-100 text-red-700'
-                                              : stock <=
+                                              : availableStock <=
                                                   Number(
                                                     product.minStock ??
                                                       3,
@@ -1822,7 +1987,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                                                 : 'bg-emerald-100 text-emerald-700'
                                           }`}
                                         >
-                                          {stock}
+                                          {availableStock}
                                         </span>
                                       </td>
                                     </tr>
@@ -1894,19 +2059,26 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
               </span>
             </div>
 
+            {returnCreditTotal > 0 && (
+              <div className="flex justify-between text-sm text-amber-700 font-semibold">
+                <span>Crédito por cambios/devoluciones</span>
+                <span>- ${formatMoney(returnCreditTotal)}</span>
+              </div>
+            )}
+
             <div className="flex justify-between items-end pt-3 mt-3 border-t border-slate-200">
               <div>
                 <div className="text-xs uppercase font-bold text-slate-500">
-                  Total venta
+                  {checkoutTotal >= 0 ? 'Total a pagar' : 'Total a devolver'}
                 </div>
                 <div className="text-xs text-slate-400 mt-1">
-                  {cart.length} producto(s) ·{' '}
-                  {totalUnits} unidad(es)
+                  {cart.length} producto(s) nuevos · {checkoutReturns.length} devolución(es) ·{' '}
+                  {totalUnits} unidad(es) nuevas
                 </div>
               </div>
 
               <div className="text-3xl font-bold text-indigo-700">
-                ${formatMoney(finalTotal)}
+                ${formatMoney(Math.abs(checkoutTotal))}
               </div>
             </div>
           </div>
@@ -1916,13 +2088,18 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
           <div>
             <h3 className="font-bold text-slate-800">
-              Forma de pago
+              {checkoutTotal > 0 ? 'Forma de pago' : checkoutTotal < 0 ? 'Forma de devolución' : 'Operación compensada'}
             </h3>
             <p className="text-xs text-slate-500 mt-1">
-              Puede ser simple o mixta.
+              {checkoutTotal > 0
+                ? 'Puede ser simple o mixta.'
+                : checkoutTotal < 0
+                  ? 'Indicá cómo se devuelve la diferencia al cliente.'
+                  : 'El valor devuelto coincide con la mercadería nueva.'}
             </p>
           </div>
 
+          {checkoutTotal > 0 && (<>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
               type="button"
@@ -2024,7 +2201,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
           {paymentMethod === 'mixed' && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-3">
               <div className="text-sm font-semibold text-slate-700">
-                Distribuir ${formatMoney(finalTotal)}
+                Distribuir ${formatMoney(checkoutTotal)}
               </div>
 
               {(
@@ -2351,6 +2528,46 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             </div>
           )}
 
+          </>)}
+
+          {checkoutTotal < -0.009 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
+              <div className="text-sm font-bold text-amber-900">Devolver al cliente: ${formatMoney(Math.abs(checkoutTotal))}</div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {([
+                  ['cash', 'Efectivo', Banknote],
+                  ['debit', 'Débito', CreditCard],
+                  ['card', 'Tarjeta', CreditCard],
+                  ['transfer', 'Transfer.', Landmark],
+                ] as const).map(([method, label, Icon]) => (
+                  <button
+                    type="button"
+                    key={method}
+                    onClick={() => { setRefundMethod(method); setRefundReceiptNumber(''); }}
+                    className={paymentButtonClass(refundMethod === method)}
+                  >
+                    <Icon size={15} /> {label}
+                  </button>
+                ))}
+              </div>
+              {(refundMethod === 'debit' || refundMethod === 'card') && (
+                <input
+                  type="text"
+                  value={refundReceiptNumber}
+                  onChange={(e) => setRefundReceiptNumber(e.target.value)}
+                  placeholder="N.º de comprobante de devolución (opcional)"
+                  className="w-full border border-amber-300 rounded-lg px-3 py-2.5 bg-white"
+                />
+              )}
+            </div>
+          )}
+
+          {Math.abs(checkoutTotal) < 0.01 && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm font-semibold">
+              No hay dinero a cobrar ni devolver. El cambio queda compensado en $0.
+            </div>
+          )}
+
           {checkoutError && (
             <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-3 py-2.5 flex gap-2 text-sm">
               <AlertTriangle
@@ -2365,21 +2582,19 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             type="button"
             onClick={handleCheckout}
             disabled={
-              cart.length === 0 ||
-              finalTotal <= 0 ||
+              (cart.length === 0 && checkoutReturns.length === 0) ||
               isProcessing ||
-              (paymentMethod === 'mixed' &&
+              (checkoutTotal > 0 && paymentMethod === 'mixed' &&
                 !mixedPaymentValid) ||
-              (accountAmount > 0 &&
+              (checkoutTotal > 0 && accountAmount > 0 &&
                 !accountInstallmentsValid)
             }
             className={`w-full py-4 rounded-xl font-bold text-lg shadow-md transition-all flex items-center justify-center gap-2 ${
-              cart.length > 0 &&
-              finalTotal > 0 &&
+              (cart.length > 0 || checkoutReturns.length > 0) &&
               !isProcessing &&
-              (paymentMethod !== 'mixed' ||
+              (checkoutTotal <= 0 || paymentMethod !== 'mixed' ||
                 mixedPaymentValid) &&
-              (accountAmount <= 0 ||
+              (checkoutTotal <= 0 || accountAmount <= 0 ||
                 accountInstallmentsValid)
                 ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-indigo-200'
                 : 'bg-slate-300 text-slate-500 cursor-not-allowed'
@@ -2391,12 +2606,22 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
             {isProcessing
               ? 'Procesando...'
-              : `Confirmar venta · $${formatMoney(
-                  finalTotal,
-                )}`}
+              : checkoutTotal > 0
+                ? `Confirmar operación · Cobrar $${formatMoney(checkoutTotal)}`
+                : checkoutTotal < 0
+                  ? `Confirmar operación · Devolver $${formatMoney(Math.abs(checkoutTotal))}`
+                  : 'Confirmar operación · Sin diferencia'}
           </button>
         </div>
       </div>
+
+      <POSReturnCreditModal
+        open={returnCreditModalOpen}
+        products={products}
+        currentUser={currentUser}
+        onClose={() => setReturnCreditModalOpen(false)}
+        onAdd={addReturnCredit}
+      />
 
       <VariantLookupModal
         open={isVariantLookupOpen}
