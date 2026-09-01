@@ -94,6 +94,15 @@ export interface Product {
 
   minStock?: number;
   active?: boolean;
+
+  // Trazabilidad: un producto dado de baja nunca se elimina físicamente.
+  discontinuedAt?: number;
+  discontinuedByUserId?: string;
+  discontinuedByUserName?: string;
+  reactivatedAt?: number;
+  reactivatedByUserId?: string;
+  reactivatedByUserName?: string;
+
   createdAt?: number;
   updatedAt?: number;
 
@@ -275,6 +284,44 @@ export interface LegacySaleAdjustment {
   commissionAdjustment: 0;
 }
 
+
+export type CheckoutReturnOrigin = 'registered' | 'legacy';
+
+// Producto devuelto dentro de una operación de Caja.
+// El crédito se aplica contra los productos nuevos de la misma operación.
+export interface CheckoutReturnCredit {
+  id: string;
+  origin: CheckoutReturnOrigin;
+  timestamp: number;
+
+  // Para devoluciones de ventas ya registradas en INVICTOS.
+  originalSaleId?: string;
+  sourceLineId?: string;
+
+  // Para ventas anteriores al sistema.
+  originalSaleDate?: number;
+  customerName?: string;
+  originalPaidAmount: number;
+
+  returnedItem: SaleReturnedLine;
+
+  // Datos de respaldo cuando el artículo ya no existe en inventario.
+  returnedProductWasMissing?: boolean;
+  returnedProductOriginalReference?: string;
+  manualReturnedProduct?: {
+    name: string;
+    referenceCode?: string;
+    size?: string;
+    color?: string;
+    category?: string;
+    provider?: string;
+    resalePrice?: number;
+    cost?: number;
+  };
+
+  notes?: string;
+}
+
 export interface Sale {
   id: string;
   items: SaleItem[];
@@ -309,6 +356,19 @@ export interface Sale {
   recordedAt?: number;
   recordedByUserId?: string;
   recordedByUserName?: string;
+
+  // Cambios/devoluciones aplicados directamente en Caja contra esta operación.
+  checkoutReturns?: CheckoutReturnCredit[];
+  returnCreditTotal?: number;
+
+  // Importe efectivamente cobrado/devuelto en Caja después de aplicar créditos.
+  // `total` conserva el valor de la mercadería nueva para los reportes.
+  settlementTotal?: number;
+  settlementDirection?: 'charge' | 'refund' | 'none';
+  refundMethod?: Exclude<PaymentMethod, 'account'>;
+  refundReceiptNumber?: string;
+
+  operationType?: 'sale' | 'sale_with_return' | 'return_only';
 
   commissionPaid?: boolean;
   commissionPaidDate?: number;
