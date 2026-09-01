@@ -272,7 +272,34 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
         y += 5;
       });
 
-      ensureSpace(48);
+      if (sale.checkoutReturns?.length) {
+        ensureSpace(18);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text('CAMBIOS / DEVOLUCIONES APLICADOS', left, y);
+        y += 5;
+        doc.line(left, y, right, y);
+        y += 5;
+
+        sale.checkoutReturns.forEach((credit) => {
+          ensureSpace(18);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(9);
+          doc.text(`DEVUELVE: ${credit.returnedItem.productName}`, left, y);
+          doc.text(`-$${money(credit.originalPaidAmount)}`, right, y, { align: 'right' });
+          y += 4.5;
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.text(
+            `${credit.returnedItem.quantity} x $${money(credit.returnedItem.unitAmount)} · ${credit.origin === 'registered' ? 'Venta INVICTOS' : 'Venta anterior al sistema'}${credit.returnedItem.returnToStock ? ' · vuelve a stock' : ' · no vuelve a stock'}`,
+            left + 3,
+            y,
+          );
+          y += 6;
+        });
+      }
+
+      ensureSpace(58);
 
       doc.setFontSize(10);
       doc.setFont('helvetica', 'normal');
@@ -286,16 +313,39 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
         y += 6;
       }
 
+      if ((sale.returnCreditTotal || 0) > 0) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(10);
+        doc.text('Mercadería nueva:', 152, y, { align: 'right' });
+        doc.text(`$${money(sale.total)}`, right, y, { align: 'right' });
+        y += 6;
+        doc.text('Crédito por devolución:', 152, y, { align: 'right' });
+        doc.text(`-$${money(sale.returnCreditTotal || 0)}`, right, y, { align: 'right' });
+        y += 6;
+      }
+
+      const settlementTotal = Number.isFinite(Number(sale.settlementTotal))
+        ? Number(sale.settlementTotal)
+        : Number(sale.total || 0);
+
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
-      doc.text('TOTAL:', 152, y, { align: 'right' });
-      doc.text(`$${money(sale.total)}`, right, y, { align: 'right' });
+      doc.text(settlementTotal < -0.009 ? 'TOTAL A DEVOLVER:' : 'TOTAL A PAGAR:', 152, y, { align: 'right' });
+      doc.text(`$${money(Math.abs(settlementTotal))}`, right, y, { align: 'right' });
       y += 9;
 
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
-      doc.text(`Forma de pago: ${paymentLabel(sale.paymentMethod)}`, left, y);
-      y += 5;
+      if (settlementTotal > 0.009) {
+        doc.text(`Forma de pago: ${paymentLabel(sale.paymentMethod)}`, left, y);
+        y += 5;
+      } else if (settlementTotal < -0.009) {
+        doc.text(`Forma de devolución: ${paymentLabel(sale.refundMethod || 'cash')}`, left, y);
+        y += 5;
+      } else {
+        doc.text('Operación compensada: sin diferencia a cobrar/devolver.', left, y);
+        y += 5;
+      }
 
       if (sale.payments?.length) {
         sale.payments.forEach((payment) => {
@@ -389,7 +439,7 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
       ) {
         await navigator.share({
           title: `Ticket INVICTOS ${receiptNumber}`,
-          text: `Comprobante de venta INVICTOS por $${money(sale.total)}.`,
+          text: `Comprobante INVICTOS por $${money(Math.abs(Number(sale.settlementTotal ?? sale.total)))}.`,
           files: [file],
         });
         return;
@@ -508,6 +558,26 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
                 ))}
               </div>
 
+              {sale.checkoutReturns?.length > 0 && (
+                <div className="border-t border-amber-200 pt-3 space-y-3">
+                  <div className="text-xs font-bold uppercase text-amber-700">Cambios / devoluciones aplicados</div>
+                  {sale.checkoutReturns.map((credit) => (
+                    <div key={credit.id} className="flex justify-between gap-4 rounded-lg bg-amber-50 border border-amber-200 p-3">
+                      <div>
+                        <div className="font-semibold text-amber-900">DEVUELVE · {credit.returnedItem.productName}</div>
+                        <div className="text-xs text-amber-700 mt-1">
+                          {credit.returnedItem.quantity} × ${money(credit.returnedItem.unitAmount)}
+                          {credit.returnedItem.size ? ` · T. ${credit.returnedItem.size}` : ''}
+                          {credit.returnedItem.color ? ` · ${credit.returnedItem.color}` : ''}
+                          {credit.origin === 'registered' ? ' · Venta INVICTOS' : ' · Venta anterior'}
+                        </div>
+                      </div>
+                      <div className="font-bold text-amber-800 shrink-0">-${money(credit.originalPaidAmount)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="border-t border-slate-200 pt-3">
                 {(sale.discount || 0) > 0 && (
                   <div className="flex justify-between text-sm text-slate-600 mb-1">
@@ -516,16 +586,45 @@ const SaleReceiptModal: React.FC<SaleReceiptModalProps> = ({
                   </div>
                 )}
 
-                <div className="flex justify-between items-end">
-                  <span className="text-sm font-bold text-slate-700">TOTAL</span>
-                  <span className="text-2xl font-black text-slate-900">
-                    ${money(sale.total)}
-                  </span>
-                </div>
+                {(sale.returnCreditTotal || 0) > 0 && (
+                  <>
+                    <div className="flex justify-between text-sm text-slate-600 mb-1">
+                      <span>Mercadería nueva</span>
+                      <span>${money(sale.total)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm text-amber-700 font-semibold mb-2">
+                      <span>Crédito por devolución</span>
+                      <span>-${money(sale.returnCreditTotal || 0)}</span>
+                    </div>
+                  </>
+                )}
 
-                <div className="text-xs text-slate-500 mt-2">
-                  Forma de pago: {paymentLabel(sale.paymentMethod)}
-                </div>
+                {(() => {
+                  const settlementTotal = Number.isFinite(Number(sale.settlementTotal))
+                    ? Number(sale.settlementTotal)
+                    : Number(sale.total || 0);
+
+                  return (
+                    <>
+                      <div className="flex justify-between items-end">
+                        <span className="text-sm font-bold text-slate-700">
+                          {settlementTotal < -0.009 ? 'TOTAL A DEVOLVER' : 'TOTAL A PAGAR'}
+                        </span>
+                        <span className="text-2xl font-black text-slate-900">
+                          ${money(Math.abs(settlementTotal))}
+                        </span>
+                      </div>
+
+                      <div className="text-xs text-slate-500 mt-2">
+                        {settlementTotal > 0.009
+                          ? `Forma de pago: ${paymentLabel(sale.paymentMethod)}`
+                          : settlementTotal < -0.009
+                            ? `Forma de devolución: ${paymentLabel(sale.refundMethod || 'cash')}`
+                            : 'Sin diferencia a cobrar/devolver'}
+                      </div>
+                    </>
+                  );
+                })()}
 
                 {sale.payments?.length > 0 && (
                   <div className="mt-2 space-y-1">
