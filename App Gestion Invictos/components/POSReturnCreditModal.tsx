@@ -535,7 +535,11 @@ const POSReturnCreditModal: React.FC<Props> = ({
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     type="button"
-                    onClick={() => setLegacySource('inventory')}
+                    onClick={() => {
+                      setLegacySource('inventory');
+                      setLegacyProductId('');
+                      setOriginalUnitAmount('');
+                    }}
                     className={`rounded-lg border p-3 text-left ${legacySource === 'inventory' ? 'border-emerald-500 bg-emerald-50' : 'border-slate-200'}`}
                   >
                     <div className="font-bold">Existe en Inventario</div>
@@ -543,7 +547,11 @@ const POSReturnCreditModal: React.FC<Props> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setLegacySource('manual')}
+                    onClick={() => {
+                      setLegacySource('manual');
+                      setLegacyProductId('');
+                      setOriginalUnitAmount('');
+                    }}
                     className={`rounded-lg border p-3 text-left ${legacySource === 'manual' ? 'border-amber-500 bg-amber-50' : 'border-slate-200'}`}
                   >
                     <div className="font-bold">Ya no está en Inventario</div>
@@ -563,7 +571,11 @@ const POSReturnCreditModal: React.FC<Props> = ({
                       <button
                         type="button"
                         key={product.id}
-                        onClick={() => setLegacyProductId(product.id)}
+                        onClick={() => {
+                          setLegacyProductId(product.id);
+                          setQuantity(1);
+                          setOriginalUnitAmount(String(Math.max(0, Number(product.price || 0))));
+                        }}
                         className={`w-full p-3 text-left ${legacyProductId === product.id ? 'bg-emerald-50' : 'hover:bg-slate-50'}`}
                       >
                         <div className="flex justify-between gap-3">
