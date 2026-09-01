@@ -1,1470 +1,953 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Product, CategoryItem, ProviderItem, User } from '../types';
-import {
-  Plus,
-  Search,
-  Trash2,
-  Edit2,
-  Save,
-  X,
-  Tag,
-  Truck,
-  Barcode,
-  FolderCog,
-  Briefcase,
-  PackagePlus,
-  ArrowRight,
-  Download,
-  Loader2,
-  RefreshCw,
-  Shirt,
-  Palette,
-  AlertTriangle,
-  Camera,
-  Printer,
-  Megaphone,
-} from 'lucide-react';
+import { Plus, Search, Trash2, Edit2, Save, X, Tag, Truck, Barcode, FolderCog, Briefcase, PackagePlus, ArrowRight, Download, Loader2, RefreshCw, Shirt, Palette, AlertTriangle, Camera, Printer, Megaphone, } from 'lucide-react';
 import { StorageService } from '../services/storageService';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import BarcodeLabelModal from './BarcodeLabelModal';
 import ProviderManagementModal from './ProviderManagementModal';
 import VariantLookupModal from './VariantLookupModal';
-
 interface InventoryProps {
-  products: Product[];
-  currentUser: User;
-  onUpdate: () => void | Promise<void>;
+    products: Product[];
+    currentUser: User;
+    onUpdate: () => void | Promise<void>;
 }
-
 interface VariantDraft {
-  key: string;
-  size: string;
-  color: string;
-  stock: number;
-  enabled: boolean;
+    key: string;
+    size: string;
+    color: string;
+    stock: number;
+    enabled: boolean;
 }
-
-
 interface AdminAuthorizationOption {
-  id: string;
-  name: string;
+    id: string;
+    name: string;
 }
-
 interface PendingRestockAuthorization {
-  productId: string;
-  quantity: number;
-  newCost: number;
-  generateLabels: boolean;
+    productId: string;
+    quantity: number;
+    newCost: number;
+    generateLabels: boolean;
 }
-
-/**
- * Portal fuera del componente:
- * evita que el modal se desmonte/monte en cada render y pierda el foco.
- */
-const Portal: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  if (typeof document === 'undefined') return null;
-  return createPortal(children, document.body);
+const Portal: React.FC<{
+    children: React.ReactNode;
+}> = ({ children }) => {
+    if (typeof document === 'undefined')
+        return null;
+    return createPortal(children, document.body);
 };
-
-const normalizeComparableText = (value: unknown): string =>
-  String(value || '')
+const normalizeComparableText = (value: unknown): string => String(value || '')
     .trim()
     .replace(/\s+/g, ' ')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
-
 const canonicalizeColor = (value: unknown): string => {
-  const clean = String(value || '')
-    .trim()
-    .replace(/\s+/g, ' ');
-
-  if (!clean) return '';
-
-  const key = normalizeComparableText(clean);
-
-  const aliases: Record<string, string> = {
-    negro: 'Negro',
-    negra: 'Negro',
-
-    blanco: 'Blanco',
-    blanca: 'Blanco',
-
-    rojo: 'Rojo',
-    roja: 'Rojo',
-
-    amarillo: 'Amarillo',
-    amarilla: 'Amarillo',
-
-    morado: 'Morado',
-    morada: 'Morado',
-
-    marron: 'Marrón',
-
-    fucsia: 'Fucsia',
-    fuxia: 'Fucsia',
-    fuxsia: 'Fucsia',
-    fuchsia: 'Fucsia',
-  };
-
-  return aliases[key] || clean;
+    const clean = String(value || '')
+        .trim()
+        .replace(/\s+/g, ' ');
+    if (!clean)
+        return '';
+    const key = normalizeComparableText(clean);
+    const aliases: Record<string, string> = {
+        negro: 'Negro',
+        negra: 'Negro',
+        blanco: 'Blanco',
+        blanca: 'Blanco',
+        rojo: 'Rojo',
+        roja: 'Rojo',
+        amarillo: 'Amarillo',
+        amarilla: 'Amarillo',
+        morado: 'Morado',
+        morada: 'Morado',
+        marron: 'Marrón',
+        fucsia: 'Fucsia',
+        fuxia: 'Fucsia',
+        fuxsia: 'Fucsia',
+        fuchsia: 'Fucsia',
+    };
+    return aliases[key] || clean;
 };
-
-const colorComparisonKey = (value: unknown): string =>
-  normalizeComparableText(canonicalizeColor(value));
-
-const Inventory: React.FC<InventoryProps> = ({
-  products: incomingProducts,
-  currentUser,
-  onUpdate,
-}) => {
-  // Protección defensiva: Inventario nunca trabaja con products undefined/null.
-  const products: Product[] = Array.isArray(incomingProducts)
-    ? incomingProducts
-    : [];
-
-  const shortCodeMigrationStarted = useRef(false);
-
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
-
-  // Management Modals
-  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
-  const [isProviderModalOpen, setIsProviderModalOpen] = useState(false);
-  const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
-  const [isScannerOpen, setIsScannerOpen] = useState(false);
-  const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
-  const [scanError, setScanError] = useState('');
-  const [labelProduct, setLabelProduct] = useState<Product | null>(null);
-  const [labelStockEntryQuantity, setLabelStockEntryQuantity] = useState<number | undefined>(undefined);
-
-  // Resultado inmediato después de crear un producto / variantes.
-  // Permite ver los códigos y generar etiquetas sin tener que buscarlo.
-  const [createdProducts, setCreatedProducts] = useState<Product[]>([]);
-
-  const [generateRestockLabels, setGenerateRestockLabels] = useState(false);
-  const [adminAuthorizationOptions, setAdminAuthorizationOptions] = useState<AdminAuthorizationOption[]>([]);
-  const [isRestockAuthorizationOpen, setIsRestockAuthorizationOpen] = useState(false);
-  const [authorizationAdminId, setAuthorizationAdminId] = useState('');
-  const [authorizationPin, setAuthorizationPin] = useState('');
-  const [authorizationError, setAuthorizationError] = useState('');
-  const [isAuthorizingRestock, setIsAuthorizingRestock] = useState(false);
-  const [pendingRestockAuthorization, setPendingRestockAuthorization] = useState<PendingRestockAuthorization | null>(null);
-  const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
-
-  const [searchTerm, setSearchTerm] = useState('');
-  const [filterCategory, setFilterCategory] = useState<string>('ALL');
-  const [filterSize, setFilterSize] = useState<string>('ALL');
-
-  // Lists
-  const [categories, setCategories] = useState<CategoryItem[]>([]);
-  const [providers, setProviders] = useState<ProviderItem[]>([]);
-
-  // Input states for managers
-  const [newCategoryName, setNewCategoryName] = useState('');
-
-  const [editingCategoryId, setEditingCategoryId] =
-    useState<string | null>(null);
-  const [editingCategoryName, setEditingCategoryName] =
-    useState('');
-  const [isSavingCategory, setIsSavingCategory] =
-    useState(false);
-  const [categoryMessage, setCategoryMessage] =
-    useState('');
-
-  const [formError, setFormError] = useState('');
-
-  // Alta masiva de variantes desde el único botón "Nuevo Producto".
-  const [newProductSizes, setNewProductSizes] = useState<string[]>([]);
-  const [newProductColors, setNewProductColors] = useState<string[]>([]);
-
-  // Opciones predefinidas/reutilizables.
-  const [availableSizes, setAvailableSizes] = useState<string[]>([]);
-  const [availableColors, setAvailableColors] = useState<string[]>([]);
-
-  const [newSizeInput, setNewSizeInput] = useState('');
-  const [newColorInput, setNewColorInput] = useState('');
-  const [variantDrafts, setVariantDrafts] = useState<VariantDraft[]>([]);
-
-  // Combinaciones eliminadas manualmente durante el alta.
-  // Se mantienen fuera de la matriz aunque cambie el stock de otras variantes.
-  const [excludedVariantKeys, setExcludedVariantKeys] = useState<string[]>([]);
-
-  // Form State for Products
-  const [formData, setFormData] = useState<Partial<Product>>({
-    name: '',
-    code: '',
-    barcode: '',
-    category: '',
-    provider: '',
-    price: 0,
-    cost: 0,
-    stock: 0,
-    minStock: 3,
-    size: '',
-    color: '',
-    gender: '',
-    description: '',
-    salesNote: '',
-    active: true,
-    commissionPercentage: undefined,
-  });
-
-  // State for Restock
-  const [restockProductId, setRestockProductId] = useState<string>('');
-  const [restockSearch, setRestockSearch] = useState('');
-  const [restockQuantity, setRestockQuantity] = useState<number>(0);
-  const [restockNewCost, setRestockNewCost] = useState<number>(0);
-
-  const loadLists = useCallback(async () => {
-    const [cats, provs, variantOptions] = await Promise.all([
-      StorageService.getCategories(),
-      StorageService.getProviders(),
-      StorageService.getVariantOptions(),
-    ]);
-
-    setCategories(cats);
-    setProviders(provs);
-
-    const normalizeSizeList = (values: string[]): string[] => {
-      const seen = new Set<string>();
-
-      return values
-        .map((value) =>
-          String(value || '')
-            .trim()
-            .replace(/\s+/g, ' '),
-        )
-        .filter((value) => {
-          if (!value) return false;
-
-          const key = normalizeComparableText(value);
-
-          if (seen.has(key)) return false;
-
-          seen.add(key);
-          return true;
+const colorComparisonKey = (value: unknown): string => normalizeComparableText(canonicalizeColor(value));
+const Inventory: React.FC<InventoryProps> = ({ products: incomingProducts, currentUser, onUpdate, }) => {
+    const products: Product[] = Array.isArray(incomingProducts)
+        ? incomingProducts
+        : [];
+    const shortCodeMigrationStarted = useRef(false);
+    const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
+    const [isProviderModalOpen, setIsProviderModalOpen] = useState(false);
+    const [isRestockModalOpen, setIsRestockModalOpen] = useState(false);
+    const [isScannerOpen, setIsScannerOpen] = useState(false);
+    const [scannedProduct, setScannedProduct] = useState<Product | null>(null);
+    const [scanError, setScanError] = useState('');
+    const [labelProduct, setLabelProduct] = useState<Product | null>(null);
+    const [labelStockEntryQuantity, setLabelStockEntryQuantity] = useState<number | undefined>(undefined);
+    const [createdProducts, setCreatedProducts] = useState<Product[]>([]);
+    const [generateRestockLabels, setGenerateRestockLabels] = useState(false);
+    const [adminAuthorizationOptions, setAdminAuthorizationOptions] = useState<AdminAuthorizationOption[]>([]);
+    const [isRestockAuthorizationOpen, setIsRestockAuthorizationOpen] = useState(false);
+    const [authorizationAdminId, setAuthorizationAdminId] = useState('');
+    const [authorizationPin, setAuthorizationPin] = useState('');
+    const [authorizationError, setAuthorizationError] = useState('');
+    const [isAuthorizingRestock, setIsAuthorizingRestock] = useState(false);
+    const [pendingRestockAuthorization, setPendingRestockAuthorization] = useState<PendingRestockAuthorization | null>(null);
+    const [isVariantLookupOpen, setIsVariantLookupOpen] = useState(false);
+    const [searchTerm, setSearchTerm] = useState('');
+    const [filterCategory, setFilterCategory] = useState<string>('ALL');
+    const [filterSize, setFilterSize] = useState<string>('ALL');
+    const [categories, setCategories] = useState<CategoryItem[]>([]);
+    const [providers, setProviders] = useState<ProviderItem[]>([]);
+    const [newCategoryName, setNewCategoryName] = useState('');
+    const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+    const [editingCategoryName, setEditingCategoryName] = useState('');
+    const [isSavingCategory, setIsSavingCategory] = useState(false);
+    const [categoryMessage, setCategoryMessage] = useState('');
+    const [formError, setFormError] = useState('');
+    const [newProductSizes, setNewProductSizes] = useState<string[]>([]);
+    const [newProductColors, setNewProductColors] = useState<string[]>([]);
+    const [availableSizes, setAvailableSizes] = useState<string[]>([]);
+    const [availableColors, setAvailableColors] = useState<string[]>([]);
+    const [newSizeInput, setNewSizeInput] = useState('');
+    const [newColorInput, setNewColorInput] = useState('');
+    const [variantDrafts, setVariantDrafts] = useState<VariantDraft[]>([]);
+    const [excludedVariantKeys, setExcludedVariantKeys] = useState<string[]>([]);
+    const [formData, setFormData] = useState<Partial<Product>>({
+        name: '',
+        code: '',
+        barcode: '',
+        category: '',
+        provider: '',
+        price: 0,
+        cost: 0,
+        stock: 0,
+        minStock: 3,
+        size: '',
+        color: '',
+        gender: '',
+        description: '',
+        salesNote: '',
+        active: true,
+        commissionPercentage: undefined,
+    });
+    const [restockProductId, setRestockProductId] = useState<string>('');
+    const [restockSearch, setRestockSearch] = useState('');
+    const [restockQuantity, setRestockQuantity] = useState<number>(0);
+    const [restockNewCost, setRestockNewCost] = useState<number>(0);
+    const loadLists = useCallback(async () => {
+        const [cats, provs, variantOptions] = await Promise.all([
+            StorageService.getCategories(),
+            StorageService.getProviders(),
+            StorageService.getVariantOptions(),
+        ]);
+        setCategories(cats);
+        setProviders(provs);
+        const normalizeSizeList = (values: string[]): string[] => {
+            const seen = new Set<string>();
+            return values
+                .map((value) => String(value || '')
+                .trim()
+                .replace(/\s+/g, ' '))
+                .filter((value) => {
+                if (!value)
+                    return false;
+                const key = normalizeComparableText(value);
+                if (seen.has(key))
+                    return false;
+                seen.add(key);
+                return true;
+            });
+        };
+        const normalizeColorList = (values: string[]): string[] => {
+            const seen = new Set<string>();
+            const result: string[] = [];
+            values.forEach((value) => {
+                const canonical = canonicalizeColor(value);
+                if (!canonical)
+                    return;
+                const key = colorComparisonKey(canonical);
+                if (seen.has(key))
+                    return;
+                seen.add(key);
+                result.push(canonical);
+            });
+            return result;
+        };
+        const sizesFromProducts = products
+            .map((product) => (product.size || '').trim())
+            .filter(Boolean);
+        const colorsFromProducts = products
+            .map((product) => (product.color || '').trim())
+            .filter(Boolean);
+        setAvailableSizes(normalizeSizeList([
+            ...variantOptions.sizes,
+            ...sizesFromProducts,
+        ]));
+        setAvailableColors(normalizeColorList([
+            ...variantOptions.colors,
+            ...colorsFromProducts,
+        ]));
+        setFormData((prev) => ({
+            ...prev,
+            category: prev.category || (cats.length > 0 ? cats[0].name : ''),
+            provider: prev.provider || (provs.length > 0 ? provs[0].name : ''),
+        }));
+    }, [products]);
+    useEffect(() => {
+        void loadLists();
+    }, [loadLists]);
+    useEffect(() => {
+        if (shortCodeMigrationStarted.current ||
+            products.length === 0 ||
+            !products.some((product) => !(product.shortCode || '').trim())) {
+            return;
+        }
+        shortCodeMigrationStarted.current = true;
+        void (async () => {
+            try {
+                const updated = await StorageService.ensureProductShortCodes();
+                if (updated > 0) {
+                    await Promise.resolve(onUpdate());
+                }
+            }
+            catch (error) {
+                console.error('No se pudieron completar los códigos cortos:', error);
+            }
+        })();
+    }, [products, onUpdate]);
+    const calculateEanCheckDigit = (twelveDigits: string): number => {
+        const digits = twelveDigits.split('').map(Number);
+        const sum = digits.reduce((acc, digit, index) => acc + digit * (index % 2 === 0 ? 1 : 3), 0);
+        return (10 - (sum % 10)) % 10;
+    };
+    const generateInternalBarcode = (): string => {
+        const existing = new Set(products
+            .map((p) => (p.barcode || '').trim())
+            .filter(Boolean));
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+            const timePart = String(Date.now() + attempt).slice(-8);
+            const randomPart = String(Math.floor(Math.random() * 100))
+                .padStart(2, '0');
+            const base12 = `20${timePart}${randomPart}`;
+            const candidate = `${base12}${calculateEanCheckDigit(base12)}`;
+            if (!existing.has(candidate))
+                return candidate;
+        }
+        const base12 = `20${String(Date.now()).slice(-10)}`;
+        return `${base12}${calculateEanCheckDigit(base12)}`;
+    };
+    const generateSku = (): string => {
+        const existing = new Set(products
+            .map((p) => (p.code || '').trim().toUpperCase())
+            .filter(Boolean));
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+            const candidate = `INV-${String(Date.now() + attempt).slice(-7)}`;
+            if (!existing.has(candidate.toUpperCase()))
+                return candidate;
+        }
+        return `INV-${Date.now()}`;
+    };
+    const buildEmptyForm = (): Partial<Product> => ({
+        name: '',
+        code: generateSku(),
+        shortCode: '',
+        barcode: generateInternalBarcode(),
+        category: categories.length > 0 ? categories[0].name : '',
+        provider: providers.length > 0 ? providers[0].name : '',
+        price: 0,
+        cost: 0,
+        stock: 0,
+        minStock: 3,
+        size: '',
+        color: '',
+        gender: '',
+        description: '',
+        salesNote: '',
+        active: true,
+        commissionPercentage: undefined,
+    });
+    const normalizeVariantValue = (value: string): string => value.trim().replace(/\s+/g, ' ');
+    const variantKey = (size: string, color: string): string => `${normalizeVariantValue(size).toLowerCase()}||${normalizeVariantValue(color).toLowerCase()}`;
+    const toggleSize = (size: string) => {
+        setNewProductSizes((prev) => {
+            const exists = prev.some((item) => item.toLowerCase() === size.toLowerCase());
+            return exists
+                ? prev.filter((item) => item.toLowerCase() !== size.toLowerCase())
+                : [...prev, size];
         });
     };
-
-    const normalizeColorList = (values: string[]): string[] => {
-      const seen = new Set<string>();
-      const result: string[] = [];
-
-      values.forEach((value) => {
-        const canonical = canonicalizeColor(value);
-
-        if (!canonical) return;
-
-        const key = colorComparisonKey(canonical);
-
-        if (seen.has(key)) return;
-
-        seen.add(key);
-        result.push(canonical);
-      });
-
-      return result;
+    const toggleColor = (color: string) => {
+        setNewProductColors((prev) => {
+            const canonical = canonicalizeColor(color);
+            const targetKey = colorComparisonKey(canonical);
+            const exists = prev.some((item) => colorComparisonKey(item) === targetKey);
+            return exists
+                ? prev.filter((item) => colorComparisonKey(item) !== targetKey)
+                : [...prev, canonical];
+        });
     };
-
-    // También incorpora talles/colores ya usados en productos existentes.
-    const sizesFromProducts = products
-      .map((product) => (product.size || '').trim())
-      .filter(Boolean);
-
-    const colorsFromProducts = products
-      .map((product) => (product.color || '').trim())
-      .filter(Boolean);
-
-    setAvailableSizes(
-      normalizeSizeList([
-        ...variantOptions.sizes,
-        ...sizesFromProducts,
-      ]),
-    );
-
-    setAvailableColors(
-      normalizeColorList([
-        ...variantOptions.colors,
-        ...colorsFromProducts,
-      ]),
-    );
-
-    setFormData((prev) => ({
-      ...prev,
-      category: prev.category || (cats.length > 0 ? cats[0].name : ''),
-      provider: prev.provider || (provs.length > 0 ? provs[0].name : ''),
-    }));
-  }, [products]);
-
-  useEffect(() => {
-    void loadLists();
-  }, [loadLists]);
-
-  // Completa automáticamente códigos cortos en productos anteriores.
-  useEffect(() => {
-    if (
-      shortCodeMigrationStarted.current ||
-      products.length === 0 ||
-      !products.some((product) => !(product.shortCode || '').trim())
-    ) {
-      return;
-    }
-
-    shortCodeMigrationStarted.current = true;
-
-    void (async () => {
-      try {
-        const updated = await StorageService.ensureProductShortCodes();
-
-        if (updated > 0) {
-          await Promise.resolve(onUpdate());
+    const addSize = async () => {
+        const value = normalizeVariantValue(newSizeInput);
+        if (!value)
+            return;
+        const existingOption = availableSizes.find((item) => item.toLowerCase() === value.toLowerCase());
+        const finalValue = existingOption || value;
+        if (!existingOption) {
+            setAvailableSizes((prev) => [...prev, value]);
+            try {
+                const saved = await StorageService.addVariantOption('size', value);
+                setAvailableSizes(saved);
+            }
+            catch (error) {
+                console.error('No se pudo guardar el nuevo talle:', error);
+            }
         }
-      } catch (error) {
-        console.error('No se pudieron completar los códigos cortos:', error);
-      }
-    })();
-  }, [products, onUpdate]);
-
-  // ===============================
-  // Helpers de identificación
-  // ===============================
-
-  const calculateEanCheckDigit = (twelveDigits: string): number => {
-    const digits = twelveDigits.split('').map(Number);
-    const sum = digits.reduce(
-      (acc, digit, index) => acc + digit * (index % 2 === 0 ? 1 : 3),
-      0,
-    );
-    return (10 - (sum % 10)) % 10;
-  };
-
-  /**
-   * Genera un código corto único para QR y búsqueda manual.
-   */
-  const generateShortCode = (): string => {
-    const existing = new Set(
-      products
-        .map((p) => (p.shortCode || '').trim())
-        .filter(Boolean),
-    );
-
-    let candidate = 1000;
-
-    while (existing.has(String(candidate))) {
-      candidate += 1;
-    }
-
-    return String(candidate);
-  };
-
-  /**
-   * Genera un número de 13 dígitos para uso interno de INVICTOS.
-   * Se valida contra los códigos ya cargados en memoria para evitar duplicados.
-   */
-  const generateInternalBarcode = (): string => {
-    const existing = new Set(
-      products
-        .map((p) => (p.barcode || '').trim())
-        .filter(Boolean),
-    );
-
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const timePart = String(Date.now() + attempt).slice(-8);
-      const randomPart = String(Math.floor(Math.random() * 100))
-        .padStart(2, '0');
-
-      const base12 = `20${timePart}${randomPart}`; // 12 dígitos
-      const candidate = `${base12}${calculateEanCheckDigit(base12)}`;
-
-      if (!existing.has(candidate)) return candidate;
-    }
-
-    // Fallback extremadamente improbable
-    const base12 = `20${String(Date.now()).slice(-10)}`;
-    return `${base12}${calculateEanCheckDigit(base12)}`;
-  };
-
-  const generateSku = (): string => {
-    const existing = new Set(
-      products
-        .map((p) => (p.code || '').trim().toUpperCase())
-        .filter(Boolean),
-    );
-
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      const candidate = `INV-${String(Date.now() + attempt).slice(-7)}`;
-      if (!existing.has(candidate.toUpperCase())) return candidate;
-    }
-
-    return `INV-${Date.now()}`;
-  };
-
-  const buildEmptyForm = (): Partial<Product> => ({
-    name: '',
-    code: generateSku(),
-    shortCode: generateShortCode(),
-    barcode: generateInternalBarcode(),
-    category: categories.length > 0 ? categories[0].name : '',
-    provider: providers.length > 0 ? providers[0].name : '',
-    price: 0,
-    cost: 0,
-    stock: 0,
-    minStock: 3,
-    size: '',
-    color: '',
-    gender: '',
-    description: '',
-    salesNote: '',
-    active: true,
-    commissionPercentage: undefined,
-  });
-
-  const normalizeVariantValue = (value: string): string =>
-    value.trim().replace(/\s+/g, ' ');
-
-  const variantKey = (size: string, color: string): string =>
-    `${normalizeVariantValue(size).toLowerCase()}||${normalizeVariantValue(
-      color,
-    ).toLowerCase()}`;
-
-  const toggleSize = (size: string) => {
-    setNewProductSizes((prev) => {
-      const exists = prev.some(
-        (item) =>
-          item.toLowerCase() === size.toLowerCase(),
-      );
-
-      return exists
-        ? prev.filter(
-            (item) =>
-              item.toLowerCase() !== size.toLowerCase(),
-          )
-        : [...prev, size];
-    });
-  };
-
-  const toggleColor = (color: string) => {
-    setNewProductColors((prev) => {
-      const canonical = canonicalizeColor(color);
-      const targetKey = colorComparisonKey(canonical);
-
-      const exists = prev.some(
-        (item) =>
-          colorComparisonKey(item) === targetKey,
-      );
-
-      return exists
-        ? prev.filter(
-            (item) =>
-              colorComparisonKey(item) !== targetKey,
-          )
-        : [...prev, canonical];
-    });
-  };
-
-  const addSize = async () => {
-    const value = normalizeVariantValue(newSizeInput);
-
-    if (!value) return;
-
-    const existingOption = availableSizes.find(
-      (item) =>
-        item.toLowerCase() === value.toLowerCase(),
-    );
-
-    const finalValue = existingOption || value;
-
-    if (!existingOption) {
-      setAvailableSizes((prev) => [...prev, value]);
-
-      try {
-        const saved =
-          await StorageService.addVariantOption(
-            'size',
-            value,
-          );
-
-        setAvailableSizes(saved);
-      } catch (error) {
-        console.error(
-          'No se pudo guardar el nuevo talle:',
-          error,
-        );
-      }
-    }
-
-    setNewProductSizes((prev) =>
-      prev.some(
-        (item) =>
-          item.toLowerCase() ===
-          finalValue.toLowerCase(),
-      )
-        ? prev
-        : [...prev, finalValue],
-    );
-
-    setNewSizeInput('');
-  };
-
-  const addColor = async () => {
-    const rawValue = normalizeVariantValue(newColorInput);
-    const value = canonicalizeColor(rawValue);
-
-    if (!value) return;
-
-    const valueKey = colorComparisonKey(value);
-
-    const existingOption = availableColors.find(
-      (item) =>
-        colorComparisonKey(item) === valueKey,
-    );
-
-    const finalValue = existingOption || value;
-
-    if (!existingOption) {
-      setAvailableColors((prev) => [...prev, value]);
-
-      try {
-        const saved =
-          await StorageService.addVariantOption(
-            'color',
-            value,
-          );
-
-        setAvailableColors(saved);
-      } catch (error) {
-        console.error(
-          'No se pudo guardar el nuevo color:',
-          error,
-        );
-      }
-    }
-
-    setNewProductColors((prev) =>
-      prev.some(
-        (item) =>
-          colorComparisonKey(item) ===
-          colorComparisonKey(finalValue),
-      )
-        ? prev
-        : [...prev, finalValue],
-    );
-
-    setNewColorInput('');
-  };
-
-
-  // Construye automáticamente talle × color.
-  // Si no se carga talle ni color, queda una única variante "sin variante".
-  useEffect(() => {
-    if (!isModalOpen || formData.id) return;
-
-    const sizes =
-      newProductSizes.length > 0 ? newProductSizes : [''];
-
-    const colors =
-      newProductColors.length > 0 ? newProductColors : [''];
-
-    const combinations = sizes
-      .flatMap((size) =>
-        colors.map((color) => ({
-          key: variantKey(size, color),
-          size,
-          color,
-        })),
-      )
-      .filter(
-        (combination) =>
-          !excludedVariantKeys.includes(combination.key),
-      );
-
-    setVariantDrafts((previous) => {
-      const previousMap = new Map(
-        previous.map((variant) => [variant.key, variant]),
-      );
-
-      return combinations.map((combination) => {
-        const existing = previousMap.get(combination.key);
-
-        if (existing) {
-          return {
-            ...existing,
-            size: combination.size,
-            color: combination.color,
-          };
+        setNewProductSizes((prev) => prev.some((item) => item.toLowerCase() ===
+            finalValue.toLowerCase())
+            ? prev
+            : [...prev, finalValue]);
+        setNewSizeInput('');
+    };
+    const addColor = async () => {
+        const rawValue = normalizeVariantValue(newColorInput);
+        const value = canonicalizeColor(rawValue);
+        if (!value)
+            return;
+        const valueKey = colorComparisonKey(value);
+        const existingOption = availableColors.find((item) => colorComparisonKey(item) === valueKey);
+        const finalValue = existingOption || value;
+        if (!existingOption) {
+            setAvailableColors((prev) => [...prev, value]);
+            try {
+                const saved = await StorageService.addVariantOption('color', value);
+                setAvailableColors(saved);
+            }
+            catch (error) {
+                console.error('No se pudo guardar el nuevo color:', error);
+            }
         }
-
-        return {
-          ...combination,
-          stock: 0,
-          enabled: true,
-        };
-      });
-    });
-  }, [
-    isModalOpen,
-    formData.id,
-    newProductSizes,
-    newProductColors,
-    excludedVariantKeys,
-  ]);
-
-  const deleteVariantCombination = (key: string) => {
-    setExcludedVariantKeys((prev) =>
-      prev.includes(key) ? prev : [...prev, key],
-    );
-
-    setVariantDrafts((prev) =>
-      prev.filter((variant) => variant.key !== key),
-    );
-  };
-
-  const restoreVariantCombinations = () => {
-    setExcludedVariantKeys([]);
-  };
-
-  const activeVariantDrafts = variantDrafts.filter(
-    (variant) => variant.enabled,
-  );
-
-  const activeVariantUnits = activeVariantDrafts.reduce(
-    (total, variant) => total + Number(variant.stock || 0),
-    0,
-  );
-
-  const resetForm = useCallback(() => {
-    setFormData({
-      name: '',
-      code: '',
-      shortCode: '',
-      barcode: '',
-      category: categories.length > 0 ? categories[0].name : '',
-      provider: providers.length > 0 ? providers[0].name : '',
-      price: 0,
-      cost: 0,
-      stock: 0,
-      minStock: 3,
-      size: '',
-      color: '',
-      gender: '',
-      description: '',
-      salesNote: '',
-      active: true,
-      commissionPercentage: undefined,
-    });
-    setNewProductSizes([]);
-    setNewProductColors([]);
-    setNewSizeInput('');
-    setNewColorInput('');
-    setVariantDrafts([]);
-    setExcludedVariantKeys([]);
-    setFormError('');
-  }, [categories, providers]);
-
-  const handleOpenNewProduct = () => {
-    setFormError('');
-    setNewProductSizes([]);
-    setNewProductColors([]);
-    setNewSizeInput('');
-    setNewColorInput('');
-    setVariantDrafts([]);
-    setExcludedVariantKeys([]);
-    setFormData(buildEmptyForm());
-    setIsModalOpen(true);
-  };
-
-  // ===============================
-  // Guardado de producto
-  // ===============================
-
-  const handleSave = async () => {
-    const name = (formData.name || '').trim();
-    const category = formData.category || '';
-    const provider = formData.provider || '';
-
-    const price = Number(formData.price);
-    const cost = Number(formData.cost ?? 0);
-    const minStock = Number(formData.minStock ?? 0);
-
-    setFormError('');
-
-    if (!name || !category || !provider) {
-      setFormError('Completá nombre, categoría y proveedor.');
-      return;
-    }
-
-    if (!Number.isFinite(price) || price <= 0) {
-      setFormError('El precio debe ser mayor que cero.');
-      return;
-    }
-
-    if (!Number.isFinite(cost) || cost < 0) {
-      setFormError('El costo no puede ser negativo.');
-      return;
-    }
-
-    if (!Number.isFinite(minStock) || minStock < 0) {
-      setFormError('El stock mínimo no puede ser negativo.');
-      return;
-    }
-
-    // ======================================================
-    // EDICIÓN: sigue siendo individual, como hasta ahora.
-    // ======================================================
-    if (formData.id) {
-      const code = (formData.code || '').trim();
-      const shortCode = (formData.shortCode || '')
-        .replace(/\D/g, '')
-        .trim();
-      const barcodeValue = (formData.barcode || '').trim();
-
-      if (!code) {
-        setFormError('El producto debe tener un código / SKU.');
-        return;
-      }
-
-      if (!/^\d{4,6}$/.test(shortCode)) {
-        setFormError(
-          'El código corto / QR debe tener entre 4 y 6 números.',
-        );
-        return;
-      }
-
-      if (!barcodeValue) {
-        setFormError(
-          'El producto debe tener un código de barras.',
-        );
-        return;
-      }
-
-      const duplicateCode = products.find(
-        (p) =>
-          p.id !== formData.id &&
-          (p.code || '').trim().toLowerCase() ===
-            code.toLowerCase(),
-      );
-
-      if (duplicateCode) {
-        setFormError(
-          `El SKU "${code}" ya está usado por "${duplicateCode.name}".`,
-        );
-        return;
-      }
-
-      const duplicateShortCode = products.find(
-        (p) =>
-          p.id !== formData.id &&
-          (p.shortCode || '').trim() === shortCode,
-      );
-
-      if (duplicateShortCode) {
-        setFormError(
-          `El código corto "${shortCode}" ya está usado por "${duplicateShortCode.name}".`,
-        );
-        return;
-      }
-
-      const duplicateBarcode = products.find(
-        (p) =>
-          p.id !== formData.id &&
-          (p.barcode || '').trim() === barcodeValue,
-      );
-
-      if (duplicateBarcode) {
-        setFormError(
-          `El código de barras "${barcodeValue}" ya está usado por "${duplicateBarcode.name}".`,
-        );
-        return;
-      }
-
-      setIsSaving(true);
-
-      try {
-        const currentProduct = products.find(
-          (p) => p.id === formData.id,
-        );
-
-        const updatedProduct: Product = {
-          id: formData.id,
-          code,
-          shortCode,
-          barcode: barcodeValue,
-          parentProductId: formData.parentProductId,
-          name,
-          category,
-          provider,
-          price,
-          cost,
-          stock: Number(currentProduct?.stock ?? 0),
-          minStock,
-          size: (formData.size || '').trim(),
-          color: (formData.color || '').trim(),
-          gender: (formData.gender || '').trim(),
-          description: (formData.description as string) || '',
-          salesNote: (formData.salesNote as string) || '',
-          active: formData.active !== false,
-          createdAt: formData.createdAt,
-          updatedAt: formData.updatedAt,
-          commissionPercentage: formData.commissionPercentage,
-        };
-
-        await StorageService.saveProduct(updatedProduct);
-        await Promise.resolve(onUpdate());
-
-        setIsModalOpen(false);
-        resetForm();
-      } catch (error: any) {
-        console.error('Error guardando producto:', error);
-        setFormError(
-          error?.message || 'No se pudo guardar el producto.',
-        );
-      } finally {
-        setIsSaving(false);
-      }
-
-      return;
-    }
-
-    // ======================================================
-    // NUEVO PRODUCTO: alta conjunta de todas las variantes.
-    // ======================================================
-    if (!activeVariantDrafts.length) {
-      setFormError(
-        'Debe quedar al menos una combinación de talle/color para crear.',
-      );
-      return;
-    }
-
-    const invalidStock = activeVariantDrafts.find(
-      (variant) =>
-        !Number.isFinite(Number(variant.stock)) ||
-        Number(variant.stock) < 0,
-    );
-
-    if (invalidStock) {
-      setFormError(
-        'La cantidad inicial de cada variante debe ser cero o mayor.',
-      );
-      return;
-    }
-
-    // Impide duplicar una combinación ya existente con el mismo nombre.
-    const duplicatedCombination = activeVariantDrafts.find(
-      (variant) =>
-        products.some(
-          (product) =>
-            (product.name || '').trim().toLowerCase() ===
-              name.toLowerCase() &&
+        setNewProductColors((prev) => prev.some((item) => colorComparisonKey(item) ===
+            colorComparisonKey(finalValue))
+            ? prev
+            : [...prev, finalValue]);
+        setNewColorInput('');
+    };
+    useEffect(() => {
+        if (!isModalOpen || formData.id)
+            return;
+        const sizes = newProductSizes.length > 0 ? newProductSizes : [''];
+        const colors = newProductColors.length > 0 ? newProductColors : [''];
+        const combinations = sizes
+            .flatMap((size) => colors.map((color) => ({
+            key: variantKey(size, color),
+            size,
+            color,
+        })))
+            .filter((combination) => !excludedVariantKeys.includes(combination.key));
+        setVariantDrafts((previous) => {
+            const previousMap = new Map(previous.map((variant) => [variant.key, variant]));
+            return combinations.map((combination) => {
+                const existing = previousMap.get(combination.key);
+                if (existing) {
+                    return {
+                        ...existing,
+                        size: combination.size,
+                        color: combination.color,
+                    };
+                }
+                return {
+                    ...combination,
+                    stock: 0,
+                    enabled: true,
+                };
+            });
+        });
+    }, [
+        isModalOpen,
+        formData.id,
+        newProductSizes,
+        newProductColors,
+        excludedVariantKeys,
+    ]);
+    const deleteVariantCombination = (key: string) => {
+        setExcludedVariantKeys((prev) => prev.includes(key) ? prev : [...prev, key]);
+        setVariantDrafts((prev) => prev.filter((variant) => variant.key !== key));
+    };
+    const restoreVariantCombinations = () => {
+        setExcludedVariantKeys([]);
+    };
+    const activeVariantDrafts = variantDrafts.filter((variant) => variant.enabled);
+    const activeVariantUnits = activeVariantDrafts.reduce((total, variant) => total + Number(variant.stock || 0), 0);
+    const resetForm = useCallback(() => {
+        setFormData({
+            name: '',
+            code: '',
+            shortCode: '',
+            barcode: '',
+            category: categories.length > 0 ? categories[0].name : '',
+            provider: providers.length > 0 ? providers[0].name : '',
+            price: 0,
+            cost: 0,
+            stock: 0,
+            minStock: 3,
+            size: '',
+            color: '',
+            gender: '',
+            description: '',
+            salesNote: '',
+            active: true,
+            commissionPercentage: undefined,
+        });
+        setNewProductSizes([]);
+        setNewProductColors([]);
+        setNewSizeInput('');
+        setNewColorInput('');
+        setVariantDrafts([]);
+        setExcludedVariantKeys([]);
+        setFormError('');
+    }, [categories, providers]);
+    const handleOpenNewProduct = () => {
+        setFormError('');
+        setNewProductSizes([]);
+        setNewProductColors([]);
+        setNewSizeInput('');
+        setNewColorInput('');
+        setVariantDrafts([]);
+        setExcludedVariantKeys([]);
+        setFormData(buildEmptyForm());
+        setIsModalOpen(true);
+    };
+    const handleSave = async () => {
+        const name = (formData.name || '').trim();
+        const category = formData.category || '';
+        const provider = formData.provider || '';
+        const price = Number(formData.price);
+        const cost = Number(formData.cost ?? 0);
+        const minStock = Number(formData.minStock ?? 0);
+        setFormError('');
+        if (!name || !category || !provider) {
+            setFormError('Completá nombre, categoría y proveedor.');
+            return;
+        }
+        if (!Number.isFinite(price) || price <= 0) {
+            setFormError('El precio debe ser mayor que cero.');
+            return;
+        }
+        if (!Number.isFinite(cost) || cost < 0) {
+            setFormError('El costo no puede ser negativo.');
+            return;
+        }
+        if (!Number.isFinite(minStock) || minStock < 0) {
+            setFormError('El stock mínimo no puede ser negativo.');
+            return;
+        }
+        if (formData.id) {
+            const code = (formData.code || '').trim();
+            const shortCode = (formData.shortCode || '')
+                .replace(/\D/g, '')
+                .trim();
+            const barcodeValue = (formData.barcode || '').trim();
+            if (!code) {
+                setFormError('El producto debe tener un código / SKU.');
+                return;
+            }
+            if (!/^\d{4,6}$/.test(shortCode)) {
+                setFormError('El código corto / QR debe tener entre 4 y 6 números.');
+                return;
+            }
+            if (!barcodeValue) {
+                setFormError('El producto debe tener un código de barras.');
+                return;
+            }
+            const duplicateCode = products.find((p) => p.id !== formData.id &&
+                (p.code || '').trim().toLowerCase() ===
+                    code.toLowerCase());
+            if (duplicateCode) {
+                setFormError(`El SKU "${code}" ya está usado por "${duplicateCode.name}".`);
+                return;
+            }
+            const duplicateShortCode = products.find((p) => p.id !== formData.id &&
+                (p.shortCode || '').trim() === shortCode);
+            if (duplicateShortCode) {
+                setFormError(`El código corto "${shortCode}" ya está usado por "${duplicateShortCode.name}".`);
+                return;
+            }
+            const duplicateBarcode = products.find((p) => p.id !== formData.id &&
+                (p.barcode || '').trim() === barcodeValue);
+            if (duplicateBarcode) {
+                setFormError(`El código de barras "${barcodeValue}" ya está usado por "${duplicateBarcode.name}".`);
+                return;
+            }
+            setIsSaving(true);
+            try {
+                const currentProduct = products.find((p) => p.id === formData.id);
+                const updatedProduct: Product = {
+                    id: formData.id,
+                    code,
+                    shortCode,
+                    barcode: barcodeValue,
+                    parentProductId: formData.parentProductId,
+                    name,
+                    category,
+                    provider,
+                    price,
+                    cost,
+                    stock: Number(currentProduct?.stock ?? 0),
+                    minStock,
+                    size: (formData.size || '').trim(),
+                    color: (formData.color || '').trim(),
+                    gender: (formData.gender || '').trim(),
+                    description: (formData.description as string) || '',
+                    salesNote: (formData.salesNote as string) || '',
+                    active: formData.active !== false,
+                    createdAt: formData.createdAt,
+                    updatedAt: formData.updatedAt,
+                    commissionPercentage: formData.commissionPercentage,
+                };
+                await StorageService.saveProduct(updatedProduct);
+                await Promise.resolve(onUpdate());
+                setIsModalOpen(false);
+                resetForm();
+            }
+            catch (error: any) {
+                console.error('Error guardando producto:', error);
+                setFormError(error?.message || 'No se pudo guardar el producto.');
+            }
+            finally {
+                setIsSaving(false);
+            }
+            return;
+        }
+        if (!activeVariantDrafts.length) {
+            setFormError('Debe quedar al menos una combinación de talle/color para crear.');
+            return;
+        }
+        const invalidStock = activeVariantDrafts.find((variant) => !Number.isFinite(Number(variant.stock)) ||
+            Number(variant.stock) < 0);
+        if (invalidStock) {
+            setFormError('La cantidad inicial de cada variante debe ser cero o mayor.');
+            return;
+        }
+        const duplicatedCombination = activeVariantDrafts.find((variant) => products.some((product) => (product.name || '').trim().toLowerCase() ===
+            name.toLowerCase() &&
             (product.size || '').trim().toLowerCase() ===
-              variant.size.trim().toLowerCase() &&
+                variant.size.trim().toLowerCase() &&
             (product.color || '').trim().toLowerCase() ===
-              variant.color.trim().toLowerCase(),
-        ),
-    );
-
-    if (duplicatedCombination) {
-      setFormError(
-        `Ya existe "${name}" con talle "${
-          duplicatedCombination.size || 'sin talle'
-        }" y color "${
-          duplicatedCombination.color || 'sin color'
-        }".`,
-      );
-      return;
-    }
-
-    setIsSaving(true);
-
-    try {
-      const familyId = `family-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-
-      const reservedShortCodes = new Set(
-        products
-          .map((product) => (product.shortCode || '').trim())
-          .filter(Boolean),
-      );
-
-      const reservedCodes = new Set(
-        products
-          .map((product) =>
-            (product.code || '').trim().toUpperCase(),
-          )
-          .filter(Boolean),
-      );
-
-      const reservedBarcodes = new Set(
-        products
-          .map((product) => (product.barcode || '').trim())
-          .filter(Boolean),
-      );
-
-      let nextShortCode = 1000;
-
-      const takeShortCode = (): string => {
-        while (
-          reservedShortCodes.has(String(nextShortCode))
-        ) {
-          nextShortCode += 1;
+                variant.color.trim().toLowerCase()));
+        if (duplicatedCombination) {
+            setFormError(`Ya existe "${name}" con talle "${duplicatedCombination.size || 'sin talle'}" y color "${duplicatedCombination.color || 'sin color'}".`);
+            return;
         }
-
-        const result = String(nextShortCode);
-        reservedShortCodes.add(result);
-        nextShortCode += 1;
-        return result;
-      };
-
-      const takeSku = (index: number): string => {
-        for (let attempt = 0; attempt < 100; attempt += 1) {
-          const candidate = `INV-${String(
-            Date.now() + index * 100 + attempt,
-          ).slice(-7)}`;
-
-          if (!reservedCodes.has(candidate.toUpperCase())) {
-            reservedCodes.add(candidate.toUpperCase());
-            return candidate;
-          }
+        setIsSaving(true);
+        try {
+            const familyId = `family-${Date.now()}-${Math.random()
+                .toString(36)
+                .slice(2, 8)}`;
+            const reservedCodes = new Set(products
+                .map((product) => (product.code || '').trim().toUpperCase())
+                .filter(Boolean));
+            const reservedBarcodes = new Set(products
+                .map((product) => (product.barcode || '').trim())
+                .filter(Boolean));
+            const takeSku = (index: number): string => {
+                for (let attempt = 0; attempt < 100; attempt += 1) {
+                    const candidate = `INV-${String(Date.now() + index * 100 + attempt).slice(-7)}`;
+                    if (!reservedCodes.has(candidate.toUpperCase())) {
+                        reservedCodes.add(candidate.toUpperCase());
+                        return candidate;
+                    }
+                }
+                const fallback = `INV-${Date.now()}-${index + 1}`;
+                reservedCodes.add(fallback.toUpperCase());
+                return fallback;
+            };
+            const takeBarcode = (index: number): string => {
+                for (let attempt = 0; attempt < 100; attempt += 1) {
+                    const timePart = String(Date.now() + index * 100 + attempt).slice(-8);
+                    const randomPart = String(Math.floor(Math.random() * 100)).padStart(2, '0');
+                    const base12 = `20${timePart}${randomPart}`;
+                    const candidate = `${base12}${calculateEanCheckDigit(base12)}`;
+                    if (!reservedBarcodes.has(candidate)) {
+                        reservedBarcodes.add(candidate);
+                        return candidate;
+                    }
+                }
+                const base12 = `20${String(Date.now() + index).slice(-10)}`;
+                const fallback = `${base12}${calculateEanCheckDigit(base12)}`;
+                reservedBarcodes.add(fallback);
+                return fallback;
+            };
+            const allocatedShortCodes = await StorageService.allocateProductShortCodes(activeVariantDrafts.length);
+            const createdAt = Date.now();
+            const newProducts: Product[] = activeVariantDrafts.map((variant, index) => ({
+                id: `${createdAt}-${index}-${Math.random()
+                    .toString(36)
+                    .slice(2, 7)}`,
+                code: takeSku(index),
+                shortCode: allocatedShortCodes[index],
+                barcode: takeBarcode(index),
+                parentProductId: familyId,
+                name,
+                category,
+                provider,
+                price,
+                cost,
+                stock: Math.max(0, Number(variant.stock || 0)),
+                minStock,
+                size: variant.size.trim(),
+                color: canonicalizeColor(variant.color),
+                gender: (formData.gender || '').trim(),
+                description: (formData.description as string) || '',
+                salesNote: (formData.salesNote as string) || '',
+                active: formData.active !== false,
+                createdAt,
+                updatedAt: createdAt,
+                commissionPercentage: formData.commissionPercentage,
+            }));
+            await StorageService.saveProductsBatch(newProducts);
+            await Promise.resolve(onUpdate());
+            setIsModalOpen(false);
+            resetForm();
+            setCreatedProducts(newProducts);
         }
-
-        const fallback = `INV-${Date.now()}-${index + 1}`;
-        reservedCodes.add(fallback.toUpperCase());
-        return fallback;
-      };
-
-      const takeBarcode = (index: number): string => {
-        for (let attempt = 0; attempt < 100; attempt += 1) {
-          const timePart = String(
-            Date.now() + index * 100 + attempt,
-          ).slice(-8);
-
-          const randomPart = String(
-            Math.floor(Math.random() * 100),
-          ).padStart(2, '0');
-
-          const base12 = `20${timePart}${randomPart}`;
-          const candidate = `${base12}${calculateEanCheckDigit(
-            base12,
-          )}`;
-
-          if (!reservedBarcodes.has(candidate)) {
-            reservedBarcodes.add(candidate);
-            return candidate;
-          }
+        catch (error: any) {
+            console.error('Error creando producto y variantes:', error);
+            setFormError(error?.message ||
+                'No se pudieron crear las variantes del producto.');
         }
-
-        const base12 = `20${String(
-          Date.now() + index,
-        ).slice(-10)}`;
-
-        const fallback = `${base12}${calculateEanCheckDigit(
-          base12,
-        )}`;
-
-        reservedBarcodes.add(fallback);
-        return fallback;
-      };
-
-      const createdAt = Date.now();
-
-      const newProducts: Product[] = activeVariantDrafts.map(
-        (variant, index) => ({
-          id: `${createdAt}-${index}-${Math.random()
-            .toString(36)
-            .slice(2, 7)}`,
-          code: takeSku(index),
-          shortCode: takeShortCode(),
-          barcode: takeBarcode(index),
-          parentProductId: familyId,
-
-          name,
-          category,
-          provider,
-          price,
-          cost,
-          stock: Math.max(0, Number(variant.stock || 0)),
-          minStock,
-
-          size: variant.size.trim(),
-          color: canonicalizeColor(variant.color),
-          gender: (formData.gender || '').trim(),
-          description: (formData.description as string) || '',
-          salesNote: (formData.salesNote as string) || '',
-          active: formData.active !== false,
-          createdAt,
-          updatedAt: createdAt,
-          commissionPercentage: formData.commissionPercentage,
-        }),
-      );
-
-      await StorageService.saveProductsBatch(newProducts);
-      await Promise.resolve(onUpdate());
-
-      // Cerramos el formulario de alta, pero mostramos inmediatamente
-      // el/los productos recién creados con todos sus códigos.
-      setIsModalOpen(false);
-      resetForm();
-      setCreatedProducts(newProducts);
-    } catch (error: any) {
-      console.error('Error creando producto y variantes:', error);
-      setFormError(
-        error?.message ||
-          'No se pudieron crear las variantes del producto.',
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (currentUser.role !== 'admin') {
-      alert('Solo un administrador puede eliminar productos del inventario.');
-      return;
-    }
-    if (!confirm('¿Estás seguro de eliminar este producto?')) return;
-    await StorageService.deleteProduct(id, currentUser.id);
-    await Promise.resolve(onUpdate());
-  };
-
-  const handleEdit = (product: Product) => {
-    if (currentUser.role !== 'admin') {
-      alert('Solo un administrador puede editar productos existentes.');
-      return;
-    }
-    setFormError('');
-    setNewProductSizes([]);
-    setNewProductColors([]);
-    setNewSizeInput('');
-    setNewColorInput('');
-    setVariantDrafts([]);
-    setExcludedVariantKeys([]);
-    setFormData({
-      ...product,
-      minStock: product.minStock ?? 3,
-      shortCode: product.shortCode || generateShortCode(),
-      barcode: product.barcode || '',
-      size: product.size || '',
-      color: product.color || '',
-      gender: product.gender || '',
-      salesNote: product.salesNote || '',
-    });
-    setIsModalOpen(true);
-  };
-
-  const openProductLabel = (product: Product) => {
-    setLabelStockEntryQuantity(undefined);
-    setLabelProduct(product);
-  };
-
-  const openStockEntryLabels = (product: Product, quantity: number) => {
-    setLabelStockEntryQuantity(Math.max(1, quantity));
-    setLabelProduct(product);
-  };
-
-  const closeLabelModal = () => {
-    setLabelProduct(null);
-    setLabelStockEntryQuantity(undefined);
-  };
-
-  const closeCreatedProducts = () => {
-    setCreatedProducts([]);
-  };
-
-  const openCreatedProduct = (product: Product) => {
-    setCreatedProducts([]);
-    handleEdit(product);
-  };
-
-  const openCreatedProductLabels = (product: Product) => {
-    const quantity = Math.max(0, Number(product.stock || 0));
-
-    if (quantity > 0) {
-      openStockEntryLabels(product, quantity);
-    } else {
-      openProductLabel(product);
-    }
-  };
-
-  // ===============================
-  // Restock
-  // ===============================
-
-  const resetRestockAuthorization = () => {
-    setIsRestockAuthorizationOpen(false);
-    setAuthorizationAdminId('');
-    setAuthorizationPin('');
-    setAuthorizationError('');
-    setPendingRestockAuthorization(null);
-  };
-
-  const handleOpenRestock = (product?: Product) => {
-    resetRestockAuthorization();
-    setRestockSearch('');
-    setRestockQuantity(0);
-    setGenerateRestockLabels(false);
-    if (product) {
-      setRestockProductId(product.id);
-      setRestockNewCost(Number(product.cost ?? 0));
-    } else {
-      setRestockProductId('');
-      setRestockNewCost(0);
-    }
-    setIsRestockModalOpen(true);
-  };
-
-  const finishSuccessfulRestock = async (
-    product: Product,
-    enteredQuantity: number,
-    shouldGenerateLabels: boolean,
-  ) => {
-    await Promise.resolve(onUpdate());
-    resetRestockAuthorization();
-    setIsRestockModalOpen(false);
-    setRestockQuantity(0);
-    setGenerateRestockLabels(false);
-    if (shouldGenerateLabels) openStockEntryLabels(product, enteredQuantity);
-  };
-
-  const handleSubmitRestock = async () => {
-    if (!restockProductId || restockQuantity <= 0) return;
-    const product = products.find((p) => p.id === restockProductId);
-    if (!product) {
-      alert('No se encontró el producto seleccionado.');
-      return;
-    }
-
-    const enteredQuantity = Number(restockQuantity);
-    const shouldGenerateLabels = generateRestockLabels;
-
-    if (currentUser.role === 'admin') {
-      setIsSaving(true);
-      try {
-        await StorageService.restockProductAsAdmin(
-          product.id,
-          enteredQuantity,
-          restockNewCost,
-          currentUser.id,
-        );
-        await finishSuccessfulRestock(product, enteredQuantity, shouldGenerateLabels);
-      } catch (error: any) {
-        alert(error?.message || 'No se pudo registrar el ingreso de mercadería.');
-      } finally {
-        setIsSaving(false);
-      }
-      return;
-    }
-
-    setIsSaving(true);
-    try {
-      const admins = await StorageService.getAdminAuthorizationOptions();
-      if (!admins.length) {
-        throw new Error('No hay administradores disponibles para autorizar el ingreso.');
-      }
-      setAdminAuthorizationOptions(admins);
-      setAuthorizationAdminId(admins[0].id);
-      setAuthorizationPin('');
-      setAuthorizationError('');
-      setPendingRestockAuthorization({
-        productId: product.id,
-        quantity: enteredQuantity,
-        newCost: Number(restockNewCost || 0),
-        generateLabels: shouldGenerateLabels,
-      });
-      setIsRestockAuthorizationOpen(true);
-    } catch (error: any) {
-      alert(error?.message || 'No se pudo preparar la autorización.');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleConfirmRestockAuthorization = async () => {
-    if (!pendingRestockAuthorization || !authorizationAdminId) return;
-    const product = products.find((item) => item.id === pendingRestockAuthorization.productId);
-    if (!product) {
-      setAuthorizationError('El producto ya no está disponible.');
-      return;
-    }
-
-    setIsAuthorizingRestock(true);
-    setAuthorizationError('');
-    try {
-      await StorageService.restockProductWithAdminAuthorization(
-        pendingRestockAuthorization.productId,
-        pendingRestockAuthorization.quantity,
-        pendingRestockAuthorization.newCost,
-        currentUser.id,
-        authorizationAdminId,
-        authorizationPin,
-      );
-      await finishSuccessfulRestock(
-        product,
-        pendingRestockAuthorization.quantity,
-        pendingRestockAuthorization.generateLabels,
-      );
-    } catch (error: any) {
-      setAuthorizationError(error?.message || 'No se pudo validar la autorización del administrador.');
-    } finally {
-      setIsAuthorizingRestock(false);
-    }
-  };
-
-  // ===============================
-  // Categories
-  // ===============================
-
-  const handleAddCategory = async () => {
-    if (!newCategoryName.trim()) return;
-
-    const newCat: CategoryItem = {
-      id: Date.now().toString(),
-      name: newCategoryName.trim(),
+        finally {
+            setIsSaving(false);
+        }
     };
-
-    await StorageService.saveCategory(newCat);
-    setNewCategoryName('');
-    await loadLists();
-  };
-
-  const handleDeleteCategory = async (id: string) => {
-    if (!confirm('¿Eliminar categoría?')) return;
-
-    await StorageService.deleteCategory(id);
-    await loadLists();
-  };
-
-  const startEditCategory = (category: CategoryItem) => {
-    setEditingCategoryId(category.id);
-    setEditingCategoryName(category.name);
-    setCategoryMessage('');
-  };
-
-  const cancelEditCategory = () => {
-    setEditingCategoryId(null);
-    setEditingCategoryName('');
-    setCategoryMessage('');
-  };
-
-  const handleRenameCategory = async (category: CategoryItem) => {
-    const nextName = editingCategoryName.trim();
-
-    setCategoryMessage('');
-
-    if (!nextName) {
-      setCategoryMessage(
-        'El nombre de la categoría no puede quedar vacío.',
-      );
-      return;
-    }
-
-    const duplicate = categories.find(
-      (item) =>
-        item.id !== category.id &&
-        (item.name || '').trim().toLowerCase() ===
-          nextName.toLowerCase(),
-    );
-
-    if (duplicate) {
-      setCategoryMessage(
-        `Ya existe una categoría llamada "${duplicate.name}".`,
-      );
-      return;
-    }
-
-    setIsSavingCategory(true);
-
-    try {
-      const oldName = category.name;
-
-      const updatedProducts =
-        await StorageService.renameCategoryAndProducts(
-          category.id,
-          oldName,
-          nextName,
-        );
-
-      setFormData((prev) => ({
-        ...prev,
-        category:
-          (prev.category || '').trim().toLowerCase() ===
-          oldName.trim().toLowerCase()
-            ? nextName
-            : prev.category,
-      }));
-
-      setFilterCategory((prev) =>
-        prev !== 'ALL' &&
-        prev.trim().toLowerCase() ===
-          oldName.trim().toLowerCase()
-          ? nextName
-          : prev,
-      );
-
-      await Promise.all([
-        loadLists(),
-        Promise.resolve(onUpdate()),
-      ]);
-
-      setEditingCategoryId(null);
-      setEditingCategoryName('');
-
-      setCategoryMessage(
-        updatedProducts === 0
-          ? `Categoría actualizada a "${nextName}".`
-          : `Categoría actualizada a "${nextName}" en ${updatedProducts} producto(s).`,
-      );
-    } catch (error: any) {
-      console.error('Error renombrando categoría:', error);
-
-      setCategoryMessage(
-        error?.message ||
-          'No se pudo modificar la categoría.',
-      );
-    } finally {
-      setIsSavingCategory(false);
-    }
-  };
-
-  // ===============================
-  // Filtros
-  // ===============================
-
-  const filterAvailableSizes = Array.from(
-    new Set(
-      products
+    const handleDelete = async (id: string) => {
+        if (currentUser.role !== 'admin') {
+            alert('Solo un administrador puede eliminar productos del inventario.');
+            return;
+        }
+        if (!confirm('¿Estás seguro de eliminar este producto?'))
+            return;
+        await StorageService.deleteProduct(id, currentUser.id);
+        await Promise.resolve(onUpdate());
+    };
+    const handleEdit = (product: Product) => {
+        if (currentUser.role !== 'admin') {
+            alert('Solo un administrador puede editar productos existentes.');
+            return;
+        }
+        setFormError('');
+        setNewProductSizes([]);
+        setNewProductColors([]);
+        setNewSizeInput('');
+        setNewColorInput('');
+        setVariantDrafts([]);
+        setExcludedVariantKeys([]);
+        setFormData({
+            ...product,
+            minStock: product.minStock ?? 3,
+            shortCode: product.shortCode || '',
+            barcode: product.barcode || '',
+            size: product.size || '',
+            color: product.color || '',
+            gender: product.gender || '',
+            salesNote: product.salesNote || '',
+        });
+        setIsModalOpen(true);
+    };
+    const openProductLabel = (product: Product) => {
+        setLabelStockEntryQuantity(undefined);
+        setLabelProduct(product);
+    };
+    const openStockEntryLabels = (product: Product, quantity: number) => {
+        setLabelStockEntryQuantity(Math.max(1, quantity));
+        setLabelProduct(product);
+    };
+    const closeLabelModal = () => {
+        setLabelProduct(null);
+        setLabelStockEntryQuantity(undefined);
+    };
+    const closeCreatedProducts = () => {
+        setCreatedProducts([]);
+    };
+    const openCreatedProduct = (product: Product) => {
+        setCreatedProducts([]);
+        handleEdit(product);
+    };
+    const openCreatedProductLabels = (product: Product) => {
+        const quantity = Math.max(0, Number(product.stock || 0));
+        if (quantity > 0) {
+            openStockEntryLabels(product, quantity);
+        }
+        else {
+            openProductLabel(product);
+        }
+    };
+    const resetRestockAuthorization = () => {
+        setIsRestockAuthorizationOpen(false);
+        setAuthorizationAdminId('');
+        setAuthorizationPin('');
+        setAuthorizationError('');
+        setPendingRestockAuthorization(null);
+    };
+    const handleOpenRestock = (product?: Product) => {
+        resetRestockAuthorization();
+        setRestockSearch('');
+        setRestockQuantity(0);
+        setGenerateRestockLabels(false);
+        if (product) {
+            setRestockProductId(product.id);
+            setRestockNewCost(Number(product.cost ?? 0));
+        }
+        else {
+            setRestockProductId('');
+            setRestockNewCost(0);
+        }
+        setIsRestockModalOpen(true);
+    };
+    const finishSuccessfulRestock = async (product: Product, enteredQuantity: number, shouldGenerateLabels: boolean) => {
+        await Promise.resolve(onUpdate());
+        resetRestockAuthorization();
+        setIsRestockModalOpen(false);
+        setRestockQuantity(0);
+        setGenerateRestockLabels(false);
+        if (shouldGenerateLabels)
+            openStockEntryLabels(product, enteredQuantity);
+    };
+    const handleSubmitRestock = async () => {
+        if (!restockProductId || restockQuantity <= 0)
+            return;
+        const product = products.find((p) => p.id === restockProductId);
+        if (!product) {
+            alert('No se encontró el producto seleccionado.');
+            return;
+        }
+        const enteredQuantity = Number(restockQuantity);
+        const shouldGenerateLabels = generateRestockLabels;
+        if (currentUser.role === 'admin') {
+            setIsSaving(true);
+            try {
+                await StorageService.restockProductAsAdmin(product.id, enteredQuantity, restockNewCost, currentUser.id);
+                await finishSuccessfulRestock(product, enteredQuantity, shouldGenerateLabels);
+            }
+            catch (error: any) {
+                alert(error?.message || 'No se pudo registrar el ingreso de mercadería.');
+            }
+            finally {
+                setIsSaving(false);
+            }
+            return;
+        }
+        setIsSaving(true);
+        try {
+            const admins = await StorageService.getAdminAuthorizationOptions();
+            if (!admins.length) {
+                throw new Error('No hay administradores disponibles para autorizar el ingreso.');
+            }
+            setAdminAuthorizationOptions(admins);
+            setAuthorizationAdminId(admins[0].id);
+            setAuthorizationPin('');
+            setAuthorizationError('');
+            setPendingRestockAuthorization({
+                productId: product.id,
+                quantity: enteredQuantity,
+                newCost: Number(restockNewCost || 0),
+                generateLabels: shouldGenerateLabels,
+            });
+            setIsRestockAuthorizationOpen(true);
+        }
+        catch (error: any) {
+            alert(error?.message || 'No se pudo preparar la autorización.');
+        }
+        finally {
+            setIsSaving(false);
+        }
+    };
+    const handleConfirmRestockAuthorization = async () => {
+        if (!pendingRestockAuthorization || !authorizationAdminId)
+            return;
+        const product = products.find((item) => item.id === pendingRestockAuthorization.productId);
+        if (!product) {
+            setAuthorizationError('El producto ya no está disponible.');
+            return;
+        }
+        setIsAuthorizingRestock(true);
+        setAuthorizationError('');
+        try {
+            await StorageService.restockProductWithAdminAuthorization(pendingRestockAuthorization.productId, pendingRestockAuthorization.quantity, pendingRestockAuthorization.newCost, currentUser.id, authorizationAdminId, authorizationPin);
+            await finishSuccessfulRestock(product, pendingRestockAuthorization.quantity, pendingRestockAuthorization.generateLabels);
+        }
+        catch (error: any) {
+            setAuthorizationError(error?.message || 'No se pudo validar la autorización del administrador.');
+        }
+        finally {
+            setIsAuthorizingRestock(false);
+        }
+    };
+    const handleAddCategory = async () => {
+        if (!newCategoryName.trim())
+            return;
+        const newCat: CategoryItem = {
+            id: Date.now().toString(),
+            name: newCategoryName.trim(),
+        };
+        await StorageService.saveCategory(newCat);
+        setNewCategoryName('');
+        await loadLists();
+    };
+    const handleDeleteCategory = async (id: string) => {
+        if (!confirm('¿Eliminar categoría?'))
+            return;
+        await StorageService.deleteCategory(id);
+        await loadLists();
+    };
+    const startEditCategory = (category: CategoryItem) => {
+        setEditingCategoryId(category.id);
+        setEditingCategoryName(category.name);
+        setCategoryMessage('');
+    };
+    const cancelEditCategory = () => {
+        setEditingCategoryId(null);
+        setEditingCategoryName('');
+        setCategoryMessage('');
+    };
+    const handleRenameCategory = async (category: CategoryItem) => {
+        const nextName = editingCategoryName.trim();
+        setCategoryMessage('');
+        if (!nextName) {
+            setCategoryMessage('El nombre de la categoría no puede quedar vacío.');
+            return;
+        }
+        const duplicate = categories.find((item) => item.id !== category.id &&
+            (item.name || '').trim().toLowerCase() ===
+                nextName.toLowerCase());
+        if (duplicate) {
+            setCategoryMessage(`Ya existe una categoría llamada "${duplicate.name}".`);
+            return;
+        }
+        setIsSavingCategory(true);
+        try {
+            const oldName = category.name;
+            const updatedProducts = await StorageService.renameCategoryAndProducts(category.id, oldName, nextName);
+            setFormData((prev) => ({
+                ...prev,
+                category: (prev.category || '').trim().toLowerCase() ===
+                    oldName.trim().toLowerCase()
+                    ? nextName
+                    : prev.category,
+            }));
+            setFilterCategory((prev) => prev !== 'ALL' &&
+                prev.trim().toLowerCase() ===
+                    oldName.trim().toLowerCase()
+                ? nextName
+                : prev);
+            await Promise.all([
+                loadLists(),
+                Promise.resolve(onUpdate()),
+            ]);
+            setEditingCategoryId(null);
+            setEditingCategoryName('');
+            setCategoryMessage(updatedProducts === 0
+                ? `Categoría actualizada a "${nextName}".`
+                : `Categoría actualizada a "${nextName}" en ${updatedProducts} producto(s).`);
+        }
+        catch (error: any) {
+            console.error('Error renombrando categoría:', error);
+            setCategoryMessage(error?.message ||
+                'No se pudo modificar la categoría.');
+        }
+        finally {
+            setIsSavingCategory(false);
+        }
+    };
+    const filterAvailableSizes = Array.from(new Set(products
         .map((p) => (p.size || '').trim())
-        .filter(Boolean),
-    ),
-  ).sort((a, b) => a.localeCompare(b, 'es'));
-
-  const filteredProducts = products.filter((p) => {
-    const term = searchTerm.trim().toLowerCase();
-
-    const searchable = [
-      p.name,
-      p.code,
-      p.shortCode,
-      p.barcode,
-      p.provider,
-      p.category,
-      p.size,
-      p.color,
-      p.gender,
-      p.description,
-      p.salesNote,
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-
-    const matchesSearch = !term || searchable.includes(term);
-    const matchesCategory =
-      filterCategory === 'ALL' || p.category === filterCategory;
-    const matchesSize =
-      filterSize === 'ALL' || (p.size || '') === filterSize;
-
-    return matchesSearch && matchesCategory && matchesSize;
-  });
-
-  const restockFilteredProducts = products.filter((p) => {
-    const term = restockSearch.toLowerCase();
-
-    return (
-      (p.name || '').toLowerCase().includes(term) ||
-      (p.code || '').toLowerCase().includes(term) ||
-      (p.shortCode || '').toLowerCase().includes(term) ||
-      (p.barcode || '').toLowerCase().includes(term) ||
-      (p.size || '').toLowerCase().includes(term) ||
-      (p.color || '').toLowerCase().includes(term)
-    );
-  });
-
-  const selectedProductForRestock = products.find(
-    (p) => p.id === restockProductId,
-  );
-
-  // ===============================
-  // UI helpers
-  // ===============================
-
-  const getVariantLabel = (product: Product): string => {
-    const parts = [product.color, product.size].filter(Boolean);
-    return parts.length > 0 ? parts.join(' · ') : 'Sin variante';
-  };
-
-  const handleBarcodeDetected = async (rawCode: string) => {
-    const code = rawCode.trim();
-    if (!code) return;
-
-    setScanError('');
-
-    let product = products.find(
-      (p) =>
-        (p.shortCode || '').trim() === code ||
-        (p.barcode || '').trim() === code ||
-        (p.code || '').trim().toLowerCase() === code.toLowerCase(),
-    );
-
-    if (!product) {
-      product = (await StorageService.getProductByBarcode(code)) || undefined;
-    }
-
-    if (!product) {
-      setScannedProduct(null);
-      setScanError(`No existe un producto registrado con el código ${code}.`);
-      return;
-    }
-
-    setScannedProduct(product);
-  };
-
-  const inventoryValuation = products.reduce(
-    (acc, product) => {
-      const stock = Math.max(0, Number(product.stock || 0));
-      const cost = Math.max(0, Number(product.cost || 0));
-      const price = Math.max(0, Number(product.price || 0));
-
-      if (stock <= 0) return acc;
-
-      acc.units += stock;
-      acc.costValue += stock * cost;
-      acc.saleValue += stock * price;
-
-      if (cost <= 0) {
-        acc.unitsWithoutCost += stock;
-        acc.variantsWithoutCost += 1;
-      }
-
-      return acc;
-    },
-    {
-      units: 0,
-      costValue: 0,
-      saleValue: 0,
-      unitsWithoutCost: 0,
-      variantsWithoutCost: 0,
-    },
-  );
-
-  const inventoryPotentialMargin =
-    inventoryValuation.saleValue - inventoryValuation.costValue;
-
-  const inventoryPotentialMarginPercent =
-    inventoryValuation.saleValue > 0
-      ? (inventoryPotentialMargin / inventoryValuation.saleValue) * 100
-      : 0;
-
-  const formatInventoryMoney = (value: number): string =>
-    Number(value || 0).toLocaleString('es-AR', {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
+        .filter(Boolean))).sort((a, b) => a.localeCompare(b, 'es'));
+    const filteredProducts = products.filter((p) => {
+        const term = searchTerm.trim().toLowerCase();
+        const searchable = [
+            p.name,
+            p.code,
+            p.shortCode,
+            p.barcode,
+            p.provider,
+            p.category,
+            p.size,
+            p.color,
+            p.gender,
+            p.description,
+            p.salesNote,
+        ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+        const matchesSearch = !term || searchable.includes(term);
+        const matchesCategory = filterCategory === 'ALL' || p.category === filterCategory;
+        const matchesSize = filterSize === 'ALL' || (p.size || '') === filterSize;
+        return matchesSearch && matchesCategory && matchesSize;
     });
-
-  return (
-    <div className="space-y-6">
-      {/* CABECERA */}
+    const restockFilteredProducts = products.filter((p) => {
+        const term = restockSearch.toLowerCase();
+        return ((p.name || '').toLowerCase().includes(term) ||
+            (p.code || '').toLowerCase().includes(term) ||
+            (p.shortCode || '').toLowerCase().includes(term) ||
+            (p.barcode || '').toLowerCase().includes(term) ||
+            (p.size || '').toLowerCase().includes(term) ||
+            (p.color || '').toLowerCase().includes(term));
+    });
+    const selectedProductForRestock = products.find((p) => p.id === restockProductId);
+    const getVariantLabel = (product: Product): string => {
+        const parts = [product.color, product.size].filter(Boolean);
+        return parts.length > 0 ? parts.join(' · ') : 'Sin variante';
+    };
+    const handleBarcodeDetected = async (rawCode: string) => {
+        const code = rawCode.trim();
+        if (!code)
+            return;
+        setScanError('');
+        let product = products.find((p) => (p.shortCode || '').trim() === code ||
+            (p.barcode || '').trim() === code ||
+            (p.code || '').trim().toLowerCase() === code.toLowerCase());
+        if (!product) {
+            product = (await StorageService.getProductByBarcode(code)) || undefined;
+        }
+        if (!product) {
+            setScannedProduct(null);
+            setScanError(`No existe un producto registrado con el código ${code}.`);
+            return;
+        }
+        setScannedProduct(product);
+    };
+    const inventoryValuation = products.reduce((acc, product) => {
+        const stock = Math.max(0, Number(product.stock || 0));
+        const cost = Math.max(0, Number(product.cost || 0));
+        const price = Math.max(0, Number(product.price || 0));
+        if (stock <= 0)
+            return acc;
+        acc.units += stock;
+        acc.costValue += stock * cost;
+        acc.saleValue += stock * price;
+        if (cost <= 0) {
+            acc.unitsWithoutCost += stock;
+            acc.variantsWithoutCost += 1;
+        }
+        return acc;
+    }, {
+        units: 0,
+        costValue: 0,
+        saleValue: 0,
+        unitsWithoutCost: 0,
+        variantsWithoutCost: 0,
+    });
+    const inventoryPotentialMargin = inventoryValuation.saleValue - inventoryValuation.costValue;
+    const inventoryPotentialMarginPercent = inventoryValuation.saleValue > 0
+        ? (inventoryPotentialMargin / inventoryValuation.saleValue) * 100
+        : 0;
+    const formatInventoryMoney = (value: number): string => Number(value || 0).toLocaleString('es-AR', {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 2,
+    });
+    return (<div className="space-y-6">
+      
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-slate-800">Inventario</h2>
@@ -1474,139 +957,81 @@ const Inventory: React.FC<InventoryProps> = ({
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => setIsVariantLookupOpen(true)}
-            className="bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
-          >
-            <Shirt size={20} />
+          <button type="button" onClick={() => setIsVariantLookupOpen(true)} className="bg-white border border-indigo-200 hover:bg-indigo-50 text-indigo-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium">
+            <Shirt size={20}/>
             Talles / Colores
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setScanError('');
-              setIsScannerOpen(true);
-            }}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
-          >
-            <Camera size={20} />
+          <button type="button" onClick={() => {
+            setScanError('');
+            setIsScannerOpen(true);
+        }} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium">
+            <Camera size={20}/>
             Escanear
           </button>
 
-          {currentUser.role === 'admin' && (
-            <button
-              type="button"
-              onClick={() => StorageService.exportInventoryToCSV(products)}
-              className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
-            >
-              <Download size={20} />
+          {currentUser.role === 'admin' && (<button type="button" onClick={() => StorageService.exportInventoryToCSV(products)} className="bg-slate-800 hover:bg-slate-900 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium">
+              <Download size={20}/>
               <span className="hidden sm:inline">Exportar</span>
-            </button>
-          )}
+            </button>)}
 
-          <button
-            type="button"
-            onClick={() => handleOpenRestock()}
-            title={currentUser.role === 'seller' ? 'Requiere autorización de administrador' : 'Ingresar mercadería'}
-            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
-          >
-            <PackagePlus size={20} />
+          <button type="button" onClick={() => handleOpenRestock()} title={currentUser.role === 'seller' ? 'Requiere autorización de administrador' : 'Ingresar mercadería'} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium">
+            <PackagePlus size={20}/>
             Ingresar Mercadería
-            {currentUser.role === 'seller' && (
-              <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded">Admin</span>
-            )}
+            {currentUser.role === 'seller' && (<span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded">Admin</span>)}
           </button>
 
-          {currentUser.role === 'admin' && (
-            <>
-          <div className="w-px bg-slate-300 mx-1 hidden md:block" />
+          {currentUser.role === 'admin' && (<>
+          <div className="w-px bg-slate-300 mx-1 hidden md:block"/>
 
-          <button
-            type="button"
-            onClick={() => setIsProviderModalOpen(true)}
-            className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium shadow-sm"
-          >
-            <Briefcase size={18} />
+          <button type="button" onClick={() => setIsProviderModalOpen(true)} className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium shadow-sm">
+            <Briefcase size={18}/>
             Proveedores
           </button>
 
-          <button
-            type="button"
-            onClick={() => setIsCategoryModalOpen(true)}
-            className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium shadow-sm"
-          >
-            <FolderCog size={18} />
+          <button type="button" onClick={() => setIsCategoryModalOpen(true)} className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-4 py-2 rounded-lg flex items-center gap-2 transition-colors font-medium shadow-sm">
+            <FolderCog size={18}/>
             Categorías
           </button>
 
-            </>
-          )}
+            </>)}
 
-          <button
-            type="button"
-            onClick={handleOpenNewProduct}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium"
-          >
-            <Plus size={20} />
+          <button type="button" onClick={handleOpenNewProduct} className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition-colors shadow-sm font-medium">
+            <Plus size={20}/>
             Nuevo Producto
           </button>
         </div>
       </div>
 
-      {scanError && (
-        <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
-          <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+      {scanError && (<div className="bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 flex items-start gap-2">
+          <AlertTriangle size={18} className="mt-0.5 shrink-0"/>
           <div className="flex-1 text-sm">{scanError}</div>
           <button type="button" onClick={() => setScanError('')} className="text-red-500 hover:text-red-700">×</button>
-        </div>
-      )}
+        </div>)}
 
-      {/* FILTROS */}
+      
       <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-200 flex flex-col lg:flex-row gap-3">
         <div className="relative flex-1">
-          <Search
-            className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400"
-            size={20}
-          />
-          <input
-            type="text"
-            placeholder="Buscar nombre, SKU, código de barras, talle, color..."
-            className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
+          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" size={20}/>
+          <input type="text" placeholder="Buscar nombre, SKU, código de barras, talle, color..." className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}/>
         </div>
 
-        <select
-          className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-          value={filterCategory}
-          onChange={(e) => setFilterCategory(e.target.value)}
-        >
+        <select className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)}>
           <option value="ALL">Todas las Categorías</option>
-          {categories.map((cat) => (
-            <option key={cat.id} value={cat.name}>
+          {categories.map((cat) => (<option key={cat.id} value={cat.name}>
               {cat.name}
-            </option>
-          ))}
+            </option>))}
         </select>
 
-        <select
-          className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-          value={filterSize}
-          onChange={(e) => setFilterSize(e.target.value)}
-        >
+        <select className="px-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" value={filterSize} onChange={(e) => setFilterSize(e.target.value)}>
           <option value="ALL">Todos los Talles</option>
-          {filterAvailableSizes.map((size) => (
-            <option key={size} value={size}>
+          {filterAvailableSizes.map((size) => (<option key={size} value={size}>
               {size}
-            </option>
-          ))}
+            </option>))}
         </select>
       </div>
 
-      {/* RESUMEN RÁPIDO */}
+      
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <div className="bg-white border border-slate-200 rounded-xl p-4">
           <div className="text-xs uppercase font-semibold text-slate-400">
@@ -1631,11 +1056,7 @@ const Inventory: React.FC<InventoryProps> = ({
             Stock bajo
           </div>
           <div className="text-2xl font-bold text-amber-600 mt-1">
-            {
-              products.filter(
-                (p) => Number(p.stock || 0) <= Number(p.minStock ?? 3),
-              ).length
-            }
+            {products.filter((p) => Number(p.stock || 0) <= Number(p.minStock ?? 3)).length}
           </div>
         </div>
 
@@ -1649,8 +1070,7 @@ const Inventory: React.FC<InventoryProps> = ({
         </div>
       </div>
 
-      {currentUser.role === 'admin' && (
-        <div className="border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white rounded-2xl p-4 sm:p-5 shadow-sm">
+      {currentUser.role === 'admin' && (<div className="border border-indigo-200 bg-gradient-to-br from-indigo-50 to-white rounded-2xl p-4 sm:p-5 shadow-sm">
           <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3 mb-4">
             <div>
               <div className="text-xs uppercase tracking-wide font-bold text-indigo-600">
@@ -1714,17 +1134,16 @@ const Inventory: React.FC<InventoryProps> = ({
               <div className="text-xs text-slate-500 mt-2">
                 Venta potencial − costo ·{' '}
                 {inventoryPotentialMarginPercent.toLocaleString('es-AR', {
-                  minimumFractionDigits: 1,
-                  maximumFractionDigits: 1,
-                })}
+                minimumFractionDigits: 1,
+                maximumFractionDigits: 1,
+            })}
                 % sobre ventas.
               </div>
             </div>
           </div>
 
-          {inventoryValuation.variantsWithoutCost > 0 && (
-            <div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-xs text-amber-800 flex items-start gap-2">
-              <AlertTriangle size={15} className="shrink-0 mt-0.5" />
+          {inventoryValuation.variantsWithoutCost > 0 && (<div className="mt-3 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2.5 text-xs text-amber-800 flex items-start gap-2">
+              <AlertTriangle size={15} className="shrink-0 mt-0.5"/>
 
               <div>
                 Hay <b>{inventoryValuation.variantsWithoutCost}</b> variante(s) con
@@ -1732,12 +1151,10 @@ const Inventory: React.FC<InventoryProps> = ({
                 <b>{inventoryValuation.unitsWithoutCost}</b> unidad(es). El valor
                 a costo puede estar subestimado hasta completar esos costos.
               </div>
-            </div>
-          )}
-        </div>
-      )}
+            </div>)}
+        </div>)}
 
-      {/* TABLA */}
+      
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left min-w-[1050px]">
@@ -1769,15 +1186,10 @@ const Inventory: React.FC<InventoryProps> = ({
 
             <tbody className="divide-y divide-slate-100">
               {filteredProducts.map((product) => {
-                const stock = Number(product.stock ?? 0);
-                const minStock = Number(product.minStock ?? 3);
-                const isLow = stock <= minStock;
-
-                return (
-                  <tr
-                    key={product.id}
-                    className="hover:bg-slate-50 transition-colors"
-                  >
+            const stock = Number(product.stock ?? 0);
+            const minStock = Number(product.minStock ?? 3);
+            const isLow = stock <= minStock;
+            return (<tr key={product.id} className="hover:bg-slate-50 transition-colors">
                     <td className="px-5 py-4">
                       <div className="text-xs font-mono text-slate-700">
                         {product.code || 'S/C'}
@@ -1788,7 +1200,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       </div>
 
                       <div className="text-[11px] font-mono text-slate-400 mt-1 flex items-center gap-1">
-                        <Barcode size={12} />
+                        <Barcode size={12}/>
                         {product.barcode || 'Sin código de barras'}
                       </div>
                     </td>
@@ -1799,39 +1211,29 @@ const Inventory: React.FC<InventoryProps> = ({
                       </div>
 
                       <div className="flex flex-wrap gap-1.5 mt-1.5">
-                        {product.color && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 text-xs font-medium">
-                            <Palette size={11} />
+                        {product.color && (<span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-50 text-indigo-700 text-xs font-medium">
+                            <Palette size={11}/>
                             {product.color}
-                          </span>
-                        )}
+                          </span>)}
 
-                        {product.size && (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-medium">
-                            <Shirt size={11} />
+                        {product.size && (<span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-medium">
+                            <Shirt size={11}/>
                             Talle {product.size}
-                          </span>
-                        )}
+                          </span>)}
 
-                        {!product.color && !product.size && (
-                          <span className="text-xs text-slate-400">
+                        {!product.color && !product.size && (<span className="text-xs text-slate-400">
                             Sin variante
-                          </span>
-                        )}
+                          </span>)}
                       </div>
 
-                      {product.description && (
-                        <div className="text-xs text-slate-500 mt-1.5">
+                      {product.description && (<div className="text-xs text-slate-500 mt-1.5">
                           {product.description}
-                        </div>
-                      )}
+                        </div>)}
 
-                      {product.salesNote && (
-                        <div className="mt-2 inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold">
-                          <Megaphone size={13} className="shrink-0 mt-0.5" />
+                      {product.salesNote && (<div className="mt-2 inline-flex items-start gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-semibold">
+                          <Megaphone size={13} className="shrink-0 mt-0.5"/>
                           <span>{product.salesNote}</span>
-                        </div>
-                      )}
+                        </div>)}
                     </td>
 
                     <td className="px-5 py-4">
@@ -1840,7 +1242,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       </span>
 
                       <div className="text-xs text-slate-500 flex items-center gap-1">
-                        <Truck size={12} />
+                        <Truck size={12}/>
                         {product.provider || 'N/A'}
                       </div>
                     </td>
@@ -1855,13 +1257,9 @@ const Inventory: React.FC<InventoryProps> = ({
 
                     <td className="px-5 py-4 text-center">
                       <div className="flex flex-col items-center gap-1">
-                        <span
-                          className={`inline-flex px-2.5 py-1 rounded text-xs font-bold ${
-                            isLow
-                              ? 'bg-red-100 text-red-700'
-                              : 'bg-green-100 text-green-700'
-                          }`}
-                        >
+                        <span className={`inline-flex px-2.5 py-1 rounded text-xs font-bold ${isLow
+                    ? 'bg-red-100 text-red-700'
+                    : 'bg-green-100 text-green-700'}`}>
                           {stock}
                         </span>
 
@@ -1873,89 +1271,46 @@ const Inventory: React.FC<InventoryProps> = ({
 
                     <td className="px-5 py-4">
                       <div className="flex justify-end gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleOpenRestock(product)}
-                          title="Ingresar mercadería"
-                          className="text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 transition-colors p-2 rounded-lg"
-                        >
-                          <PackagePlus size={18} />
+                        <button type="button" onClick={() => handleOpenRestock(product)} title="Ingresar mercadería" className="text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 transition-colors p-2 rounded-lg">
+                          <PackagePlus size={18}/>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => openProductLabel(product)}
-                          title="Imprimir etiqueta"
-                          className="text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors p-2 rounded-lg"
-                        >
-                          <Printer size={18} />
+                        <button type="button" onClick={() => openProductLabel(product)} title="Imprimir etiqueta" className="text-slate-700 hover:text-slate-950 hover:bg-slate-100 transition-colors p-2 rounded-lg">
+                          <Printer size={18}/>
                         </button>
 
-                        {currentUser.role === 'admin' && (
-                          <>
-                        <button
-                          type="button"
-                          onClick={() => handleEdit(product)}
-                          title="Editar producto"
-                          className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors p-2 rounded-lg"
-                        >
-                          <Edit2 size={18} />
+                        {currentUser.role === 'admin' && (<>
+                        <button type="button" onClick={() => handleEdit(product)} title="Editar producto" className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors p-2 rounded-lg">
+                          <Edit2 size={18}/>
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(product.id)}
-                          title="Eliminar producto"
-                          className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-2 rounded-lg"
-                        >
-                          <Trash2 size={18} />
+                        <button type="button" onClick={() => handleDelete(product.id)} title="Eliminar producto" className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-2 rounded-lg">
+                          <Trash2 size={18}/>
                         </button>
-                          </>
-                        )}
+                          </>)}
 
                       </div>
                     </td>
-                  </tr>
-                );
-              })}
+                  </tr>);
+        })}
 
-              {filteredProducts.length === 0 && (
-                <tr>
-                  <td
-                    colSpan={7}
-                    className="px-6 py-10 text-center text-slate-500"
-                  >
+              {filteredProducts.length === 0 && (<tr>
+                  <td colSpan={7} className="px-6 py-10 text-center text-slate-500">
                     No se encontraron productos con estos criterios.
                   </td>
-                </tr>
-              )}
+                </tr>)}
             </tbody>
           </table>
         </div>
       </div>
 
-      <BarcodeScannerModal
-        open={isScannerOpen}
-        title="Escanear producto del inventario"
-        onClose={() => setIsScannerOpen(false)}
-        onDetected={handleBarcodeDetected}
-      />
+      <BarcodeScannerModal open={isScannerOpen} title="Escanear producto del inventario" onClose={() => setIsScannerOpen(false)} onDetected={handleBarcodeDetected}/>
 
-      <VariantLookupModal
-        open={isVariantLookupOpen}
-        products={Array.isArray(products) ? products : []}
-        onClose={() => setIsVariantLookupOpen(false)}
-      />
+      <VariantLookupModal open={isVariantLookupOpen} products={Array.isArray(products) ? products : []} onClose={() => setIsVariantLookupOpen(false)}/>
 
-      <BarcodeLabelModal
-        open={Boolean(labelProduct)}
-        product={labelProduct}
-        stockEntryQuantity={labelStockEntryQuantity}
-        onClose={closeLabelModal}
-      />
+      <BarcodeLabelModal open={Boolean(labelProduct)} product={labelProduct} stockEntryQuantity={labelStockEntryQuantity} onClose={closeLabelModal}/>
 
-      {createdProducts.length > 0 && (
-        <Portal>
+      {createdProducts.length > 0 && (<Portal>
           <div className="fixed inset-0 z-[10005] bg-black/55 sm:flex sm:items-center sm:justify-center sm:p-4">
             <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-4xl sm:rounded-2xl shadow-2xl overflow-hidden flex flex-col">
               <div className="shrink-0 px-4 sm:px-6 py-4 bg-emerald-50 border-b border-emerald-200 flex items-start justify-between gap-4">
@@ -1966,8 +1321,8 @@ const Inventory: React.FC<InventoryProps> = ({
 
                   <h3 className="text-xl font-black text-slate-900 mt-1">
                     {createdProducts.length === 1
-                      ? 'Producto creado correctamente'
-                      : `${createdProducts.length} variantes creadas correctamente`}
+                ? 'Producto creado correctamente'
+                : `${createdProducts.length} variantes creadas correctamente`}
                   </h3>
 
                   <p className="text-sm text-slate-600 mt-1">
@@ -1975,22 +1330,13 @@ const Inventory: React.FC<InventoryProps> = ({
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={closeCreatedProducts}
-                  className="p-1 text-slate-400 hover:text-slate-700"
-                  title="Cerrar"
-                >
-                  <X size={22} />
+                <button type="button" onClick={closeCreatedProducts} className="p-1 text-slate-400 hover:text-slate-700" title="Cerrar">
+                  <X size={22}/>
                 </button>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-3">
-                {createdProducts.map((product) => (
-                  <div
-                    key={product.id}
-                    className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden"
-                  >
+                {createdProducts.map((product) => (<div key={product.id} className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden">
                     <div className="p-4 sm:p-5">
                       <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
                         <div className="min-w-0 flex-1">
@@ -2000,8 +1346,8 @@ const Inventory: React.FC<InventoryProps> = ({
 
                           <div className="text-sm text-slate-500 mt-1">
                             {[product.size, product.color]
-                              .filter(Boolean)
-                              .join(' · ') || 'Sin variante'}
+                    .filter(Boolean)
+                    .join(' · ') || 'Sin variante'}
                           </div>
 
                           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mt-4">
@@ -2044,71 +1390,46 @@ const Inventory: React.FC<InventoryProps> = ({
                         </div>
 
                         <div className="grid grid-cols-2 lg:grid-cols-1 gap-2 lg:w-44 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => openCreatedProductLabels(product)}
-                            className="px-3 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center justify-center gap-2"
-                          >
-                            <Printer size={17} />
+                          <button type="button" onClick={() => openCreatedProductLabels(product)} className="px-3 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold flex items-center justify-center gap-2">
+                            <Printer size={17}/>
                             {Number(product.stock || 0) > 1
-                              ? `Etiquetas (${Number(product.stock || 0)})`
-                              : 'Generar etiqueta'}
+                    ? `Etiquetas (${Number(product.stock || 0)})`
+                    : 'Generar etiqueta'}
                           </button>
 
-                          {currentUser.role === 'admin' && (
-                            <>
-                          <button
-                            type="button"
-                            onClick={() => openCreatedProduct(product)}
-                            className="px-3 py-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold flex items-center justify-center gap-2"
-                          >
-                            <Edit2 size={17} />
+                          {currentUser.role === 'admin' && (<>
+                          <button type="button" onClick={() => openCreatedProduct(product)} className="px-3 py-3 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold flex items-center justify-center gap-2">
+                            <Edit2 size={17}/>
                             Abrir producto
                           </button>
-                            </>
-                          )}
+                            </>)}
 
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  </div>))}
               </div>
 
-              <div
-                className="shrink-0 border-t border-slate-200 bg-slate-50 p-3 sm:p-4 flex flex-col-reverse sm:flex-row sm:justify-between gap-2"
-                style={{
-                  paddingBottom:
-                    'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={closeCreatedProducts}
-                  className="px-4 py-3 rounded-xl bg-white border border-slate-300 text-slate-700 font-semibold"
-                >
+              <div className="shrink-0 border-t border-slate-200 bg-slate-50 p-3 sm:p-4 flex flex-col-reverse sm:flex-row sm:justify-between gap-2" style={{
+                paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+            }}>
+                <button type="button" onClick={closeCreatedProducts} className="px-4 py-3 rounded-xl bg-white border border-slate-300 text-slate-700 font-semibold">
                   Volver al inventario
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    closeCreatedProducts();
-                    handleOpenNewProduct();
-                  }}
-                  className="px-4 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center justify-center gap-2"
-                >
-                  <Plus size={18} />
+                <button type="button" onClick={() => {
+                closeCreatedProducts();
+                handleOpenNewProduct();
+            }} className="px-4 py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold flex items-center justify-center gap-2">
+                  <Plus size={18}/>
                   Crear otro producto
                 </button>
               </div>
             </div>
           </div>
-        </Portal>
-      )}
+        </Portal>)}
 
-      {scannedProduct && (
-        <Portal>
+      {scannedProduct && (<Portal>
           <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
             <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden">
               <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-start gap-4">
@@ -2118,7 +1439,7 @@ const Inventory: React.FC<InventoryProps> = ({
                   <p className="text-sm text-slate-500 mt-1">{getVariantLabel(scannedProduct)}</p>
                 </div>
                 <button type="button" onClick={() => setScannedProduct(null)} className="text-slate-400 hover:text-slate-600 p-1">
-                  <X size={21} />
+                  <X size={21}/>
                 </button>
               </div>
 
@@ -2166,122 +1487,84 @@ const Inventory: React.FC<InventoryProps> = ({
                 </div>
 
                 <div className={`grid ${currentUser.role === 'admin' ? 'grid-cols-3' : 'grid-cols-2'} gap-2`}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const product = scannedProduct;
-                      setScannedProduct(null);
-                      openProductLabel(product);
-                    }}
-                    className="py-3 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2"
-                  >
-                    <Printer size={18} /> Etiqueta
+                  <button type="button" onClick={() => {
+                const product = scannedProduct;
+                setScannedProduct(null);
+                openProductLabel(product);
+            }} className="py-3 bg-slate-900 hover:bg-black text-white rounded-xl font-semibold flex items-center justify-center gap-2">
+                    <Printer size={18}/> Etiqueta
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const product = scannedProduct;
-                      setScannedProduct(null);
-                      handleOpenRestock(product);
-                    }}
-                    className="py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2"
-                  >
-                    <PackagePlus size={18} /> Ingresar
+                  <button type="button" onClick={() => {
+                const product = scannedProduct;
+                setScannedProduct(null);
+                handleOpenRestock(product);
+            }} className="py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2">
+                    <PackagePlus size={18}/> Ingresar
                   </button>
-                  {currentUser.role === 'admin' && (
-                    <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const product = scannedProduct;
-                      setScannedProduct(null);
-                      handleEdit(product);
-                    }}
-                    className="py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2"
-                  >
-                    <Edit2 size={18} /> Editar
+                  {currentUser.role === 'admin' && (<>
+                  <button type="button" onClick={() => {
+                    const product = scannedProduct;
+                    setScannedProduct(null);
+                    handleEdit(product);
+                }} className="py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-semibold flex items-center justify-center gap-2">
+                    <Edit2 size={18}/> Editar
                   </button>
-                    </>
-                  )}
+                    </>)}
 
                 </div>
               </div>
             </div>
           </div>
-        </Portal>
-      )}
+        </Portal>)}
 
-      {/* RESTOCK MODAL */}
-      {isRestockModalOpen && (
-        <Portal>
+      
+      {isRestockModalOpen && (<Portal>
           <div className="fixed inset-0 bg-black/50 z-[9999] flex items-center justify-center p-4">
             <div className="bg-white rounded-xl shadow-xl max-w-lg w-full overflow-hidden animate-fade-in-up">
               <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                  <PackagePlus size={20} className="text-emerald-600" />
+                  <PackagePlus size={20} className="text-emerald-600"/>
                   Ingresar Mercadería
                 </h3>
 
-                <button
-                  type="button"
-                  onClick={() => setIsRestockModalOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
-                >
-                  <X size={20} />
+                <button type="button" onClick={() => setIsRestockModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                  <X size={20}/>
                 </button>
               </div>
 
               <div className="p-6 space-y-5">
-                {currentUser.role === 'seller' && (
-                  <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-sm">
+                {currentUser.role === 'seller' && (<div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 text-sm">
                     Podés preparar el ingreso, pero para confirmarlo un administrador deberá autorizarlo con su PIN.
-                  </div>
-                )}
+                  </div>)}
 
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">
                     Producto / Variante
                   </label>
 
-                  <select
-                    className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white font-medium"
-                    value={restockProductId}
-                    onChange={(e) => {
-                      setRestockProductId(e.target.value);
-
-                      const p = products.find(
-                        (prod) => prod.id === e.target.value,
-                      );
-
-                      if (p) setRestockNewCost(Number(p.cost ?? 0));
-                    }}
-                  >
+                  <select className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white font-medium" value={restockProductId} onChange={(e) => {
+                setRestockProductId(e.target.value);
+                const p = products.find((prod) => prod.id === e.target.value);
+                if (p)
+                    setRestockNewCost(Number(p.cost ?? 0));
+            }}>
                     <option value="">-- Seleccionar Producto --</option>
 
-                    {restockFilteredProducts.map((p) => (
-                      <option key={p.id} value={p.id}>
+                    {restockFilteredProducts.map((p) => (<option key={p.id} value={p.id}>
                         {p.name}
                         {p.color ? ` · ${p.color}` : ''}
                         {p.size ? ` · ${p.size}` : ''} ({p.code})
-                      </option>
-                    ))}
+                      </option>))}
                   </select>
 
                   <div className="mt-2 flex items-center gap-2">
-                    <Search size={14} className="text-slate-400" />
+                    <Search size={14} className="text-slate-400"/>
 
-                    <input
-                      type="text"
-                      placeholder="Filtrar por nombre, código corto QR, SKU, barcode, talle o color..."
-                      className="text-xs border-b border-slate-200 focus:border-indigo-500 focus:outline-none w-full py-1"
-                      value={restockSearch}
-                      onChange={(e) => setRestockSearch(e.target.value)}
-                    />
+                    <input type="text" placeholder="Filtrar por nombre, código corto QR, SKU, barcode, talle o color..." className="text-xs border-b border-slate-200 focus:border-indigo-500 focus:outline-none w-full py-1" value={restockSearch} onChange={(e) => setRestockSearch(e.target.value)}/>
                   </div>
                 </div>
 
-                {selectedProductForRestock && (
-                  <div className="bg-slate-50 p-4 rounded-lg border border-slate-100 space-y-2">
+                {selectedProductForRestock && (<div className="bg-slate-50 p-4 rounded-lg border border-slate-100 space-y-2">
                     <div className="flex justify-between gap-4">
                       <span className="text-sm text-slate-500">
                         Producto:
@@ -2306,7 +1589,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       </span>
                       <span className="font-mono text-xs text-slate-700 text-right">
                         {selectedProductForRestock.barcode ||
-                          selectedProductForRestock.code}
+                    selectedProductForRestock.code}
                       </span>
                     </div>
 
@@ -2325,13 +1608,10 @@ const Inventory: React.FC<InventoryProps> = ({
                       </span>
                       <span className="font-medium text-slate-700">
                         $
-                        {Number(
-                          selectedProductForRestock.cost || 0,
-                        ).toLocaleString('es-AR')}
+                        {Number(selectedProductForRestock.cost || 0).toLocaleString('es-AR')}
                       </span>
                     </div>
-                  </div>
-                )}
+                  </div>)}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -2339,17 +1619,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       Cantidad a Ingresar
                     </label>
 
-                    <input
-                      type="number"
-                      min="1"
-                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-lg font-bold text-emerald-600"
-                      value={restockQuantity}
-                      onChange={(e) =>
-                        setRestockQuantity(
-                          parseInt(e.target.value, 10) || 0,
-                        )
-                      }
-                    />
+                    <input type="number" min="1" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none text-lg font-bold text-emerald-600" value={restockQuantity} onChange={(e) => setRestockQuantity(parseInt(e.target.value, 10) || 0)}/>
                   </div>
 
                   <div>
@@ -2357,18 +1627,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       Nuevo Costo (Unit.)
                     </label>
 
-                    <input
-                      type="number"
-                      min="0"
-                      className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                      value={restockNewCost}
-                      onChange={(e) =>
-                        setRestockNewCost(
-                          parseFloat(e.target.value) || 0,
-                        )
-                      }
-                      disabled={!selectedProductForRestock}
-                    />
+                    <input type="number" min="0" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={restockNewCost} onChange={(e) => setRestockNewCost(parseFloat(e.target.value) || 0)} disabled={!selectedProductForRestock}/>
 
                     <p className="text-[10px] text-slate-400 mt-1">
                       Dejalo igual si el costo no cambió.
@@ -2376,44 +1635,27 @@ const Inventory: React.FC<InventoryProps> = ({
                   </div>
                 </div>
 
-                {selectedProductForRestock && restockQuantity > 0 && (
-                  <div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3 flex justify-between items-center">
+                {selectedProductForRestock && restockQuantity > 0 && (<div className="bg-emerald-50 border border-emerald-100 rounded-lg p-3 flex justify-between items-center">
                     <span className="text-sm text-emerald-800">
                       Stock resultante
                     </span>
                     <span className="text-lg font-bold text-emerald-700">
                       {Number(selectedProductForRestock.stock || 0) +
-                        restockQuantity}{' '}
+                    restockQuantity}{' '}
                       u.
                     </span>
-                  </div>
-                )}
+                  </div>)}
 
-                <button
-                  type="button"
-                  onClick={() =>
-                    setGenerateRestockLabels((prev) => !prev)
-                  }
-                  disabled={
-                    !selectedProductForRestock ||
-                    restockQuantity <= 0 ||
-                    isSaving
-                  }
-                  className={`w-full p-3 rounded-xl border text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                    generateRestockLabels
-                      ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
-                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
-                  }`}
-                >
+                <button type="button" onClick={() => setGenerateRestockLabels((prev) => !prev)} disabled={!selectedProductForRestock ||
+                restockQuantity <= 0 ||
+                isSaving} className={`w-full p-3 rounded-xl border text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${generateRestockLabels
+                ? 'bg-indigo-50 border-indigo-300 text-indigo-800'
+                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
                   <div className="flex items-start gap-3">
-                    <div
-                      className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
-                        generateRestockLabels
-                          ? 'bg-indigo-600 text-white'
-                          : 'bg-slate-100 text-slate-600'
-                      }`}
-                    >
-                      <Printer size={18} />
+                    <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${generateRestockLabels
+                ? 'bg-indigo-600 text-white'
+                : 'bg-slate-100 text-slate-600'}`}>
+                      <Printer size={18}/>
                     </div>
 
                     <div className="flex-1">
@@ -2423,56 +1665,37 @@ const Inventory: React.FC<InventoryProps> = ({
 
                       <div className="text-xs opacity-75 mt-0.5">
                         {generateRestockLabels
-                          ? 'Activado: al confirmar el ingreso se abrirá la selección de etiquetas.'
-                          : 'Opcional: activalo si querés imprimir etiquetas después de guardar el ingreso.'}
+                ? 'Activado: al confirmar el ingreso se abrirá la selección de etiquetas.'
+                : 'Opcional: activalo si querés imprimir etiquetas después de guardar el ingreso.'}
                       </div>
                     </div>
 
-                    <div
-                      className={`w-5 h-5 rounded-full border flex items-center justify-center mt-1 ${
-                        generateRestockLabels
-                          ? 'bg-indigo-600 border-indigo-600'
-                          : 'bg-white border-slate-300'
-                      }`}
-                    >
-                      {generateRestockLabels && (
-                        <span className="text-white text-xs">✓</span>
-                      )}
+                    <div className={`w-5 h-5 rounded-full border flex items-center justify-center mt-1 ${generateRestockLabels
+                ? 'bg-indigo-600 border-indigo-600'
+                : 'bg-white border-slate-300'}`}>
+                      {generateRestockLabels && (<span className="text-white text-xs">✓</span>)}
                     </div>
                   </div>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={handleSubmitRestock}
-                  disabled={
-                    !selectedProductForRestock ||
-                    restockQuantity <= 0 ||
-                    isSaving
-                  }
-                  className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  {isSaving ? (
-                    <Loader2 className="animate-spin" />
-                  ) : (
-                    <ArrowRight size={20} />
-                  )}
+                <button type="button" onClick={handleSubmitRestock} disabled={!selectedProductForRestock ||
+                restockQuantity <= 0 ||
+                isSaving} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+                  {isSaving ? (<Loader2 className="animate-spin"/>) : (<ArrowRight size={20}/>)}
                   Confirmar Ingreso
                 </button>
               </div>
             </div>
           </div>
-        </Portal>
-      )}
+        </Portal>)}
 
-      {isRestockAuthorizationOpen && pendingRestockAuthorization && (
-        <Portal>
+      {isRestockAuthorizationOpen && pendingRestockAuthorization && (<Portal>
           <div className="fixed inset-0 z-[10070] bg-slate-950/60 flex items-center justify-center p-4">
             <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl border border-slate-200 overflow-hidden">
               <div className="p-5 border-b border-slate-200 bg-amber-50">
                 <div className="flex items-start gap-3">
                   <div className="w-10 h-10 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
-                    <AlertTriangle size={20} />
+                    <AlertTriangle size={20}/>
                   </div>
                   <div>
                     <h3 className="font-black text-slate-900 text-lg">Autorización de administrador</h3>
@@ -2485,9 +1708,8 @@ const Inventory: React.FC<InventoryProps> = ({
 
               <div className="p-5 space-y-4">
                 {(() => {
-                  const product = products.find((item) => item.id === pendingRestockAuthorization.productId);
-                  return product ? (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm">
+                const product = products.find((item) => item.id === pendingRestockAuthorization.productId);
+                return product ? (<div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm">
                       <div className="font-bold text-slate-900">{product.name}</div>
                       <div className="text-slate-500 mt-1">
                         {[product.size, product.color].filter(Boolean).join(' · ') || 'Sin variante'}
@@ -2495,53 +1717,34 @@ const Inventory: React.FC<InventoryProps> = ({
                       <div className="mt-2 font-semibold text-emerald-700">
                         Ingreso: +{pendingRestockAuthorization.quantity} unidad(es)
                       </div>
-                    </div>
-                  ) : null;
-                })()}
+                    </div>) : null;
+            })()}
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Administrador que autoriza</label>
-                  <select
-                    value={authorizationAdminId}
-                    onChange={(e) => {
-                      setAuthorizationAdminId(e.target.value);
-                      setAuthorizationError('');
-                    }}
-                    className="w-full border border-slate-300 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  >
-                    {adminAuthorizationOptions.map((admin) => (
-                      <option key={admin.id} value={admin.id}>{admin.name}</option>
-                    ))}
+                  <select value={authorizationAdminId} onChange={(e) => {
+                setAuthorizationAdminId(e.target.value);
+                setAuthorizationError('');
+            }} className="w-full border border-slate-300 rounded-xl px-3 py-2.5 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500">
+                    {adminAuthorizationOptions.map((admin) => (<option key={admin.id} value={admin.id}>{admin.name}</option>))}
                   </select>
                 </div>
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 uppercase mb-1">PIN del administrador</label>
-                  <input
-                    type="password"
-                    inputMode="numeric"
-                    maxLength={4}
-                    autoFocus
-                    value={authorizationPin}
-                    onChange={(e) => {
-                      setAuthorizationPin(e.target.value.replace(/\D/g, '').slice(0, 4));
-                      setAuthorizationError('');
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && authorizationPin.length === 4) {
-                        void handleConfirmRestockAuthorization();
-                      }
-                    }}
-                    placeholder="••••"
-                    className="w-full text-center tracking-[0.65em] text-2xl font-black border border-slate-300 rounded-xl px-3 py-3 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500"
-                  />
+                  <input type="password" inputMode="numeric" maxLength={4} autoFocus value={authorizationPin} onChange={(e) => {
+                setAuthorizationPin(e.target.value.replace(/\D/g, '').slice(0, 4));
+                setAuthorizationError('');
+            }} onKeyDown={(e) => {
+                if (e.key === 'Enter' && authorizationPin.length === 4) {
+                    void handleConfirmRestockAuthorization();
+                }
+            }} placeholder="••••" className="w-full text-center tracking-[0.65em] text-2xl font-black border border-slate-300 rounded-xl px-3 py-3 bg-white focus:outline-none focus:ring-2 focus:ring-amber-500"/>
                 </div>
 
-                {authorizationError && (
-                  <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-sm font-medium">
+                {authorizationError && (<div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-sm font-medium">
                     {authorizationError}
-                  </div>
-                )}
+                  </div>)}
 
                 <div className="text-xs text-slate-500">
                   Quedará registrado qué vendedor realizó el ingreso y qué administrador lo autorizó.
@@ -2549,32 +1752,20 @@ const Inventory: React.FC<InventoryProps> = ({
               </div>
 
               <div className="border-t border-slate-200 bg-slate-50 p-4 flex gap-2 justify-end">
-                <button
-                  type="button"
-                  onClick={resetRestockAuthorization}
-                  disabled={isAuthorizingRestock}
-                  className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-700 font-semibold disabled:opacity-50"
-                >
+                <button type="button" onClick={resetRestockAuthorization} disabled={isAuthorizingRestock} className="px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-slate-700 font-semibold disabled:opacity-50">
                   Cancelar
                 </button>
-                <button
-                  type="button"
-                  onClick={() => void handleConfirmRestockAuthorization()}
-                  disabled={isAuthorizingRestock || !authorizationAdminId || authorizationPin.length !== 4}
-                  className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50 flex items-center gap-2"
-                >
-                  {isAuthorizingRestock ? <Loader2 size={17} className="animate-spin" /> : <Save size={17} />}
+                <button type="button" onClick={() => void handleConfirmRestockAuthorization()} disabled={isAuthorizingRestock || !authorizationAdminId || authorizationPin.length !== 4} className="px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold disabled:opacity-50 flex items-center gap-2">
+                  {isAuthorizingRestock ? <Loader2 size={17} className="animate-spin"/> : <Save size={17}/>}
                   Autorizar e ingresar
                 </button>
               </div>
             </div>
           </div>
-        </Portal>
-      )}
+        </Portal>)}
 
-      {/* PRODUCT MODAL */}
-      {isModalOpen && (
-        <Portal>
+      
+      {isModalOpen && (<Portal>
           <div className="fixed inset-0 bg-black/50 z-[9999] sm:flex sm:items-center sm:justify-center sm:p-4">
             <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[94dvh] sm:max-w-4xl sm:rounded-xl shadow-xl overflow-hidden animate-fade-in-up flex flex-col">
               <div className="shrink-0 px-4 sm:px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
@@ -2584,33 +1775,26 @@ const Inventory: React.FC<InventoryProps> = ({
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
                     {formData.id
-                      ? 'Edición individual de la variante.'
-                      : 'Cargá una vez el modelo y definí debajo todos sus talles, colores y cantidades.'}
+                ? 'Edición individual de la variante.'
+                : 'Cargá una vez el modelo y definí debajo todos sus talles, colores y cantidades.'}
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
-                >
-                  <X size={20} />
+                <button type="button" onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                  <X size={20}/>
                 </button>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-5">
-                {formError && (
-                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-start gap-2">
-                    <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                {formError && (<div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-start gap-2">
+                    <AlertTriangle size={18} className="mt-0.5 shrink-0"/>
                     <span>{formError}</span>
-                  </div>
-                )}
+                  </div>)}
 
-                {/* IDENTIFICACIÓN */}
-                {formData.id ? (
-                <div className="border border-slate-200 rounded-xl p-4">
+                
+                {formData.id ? (<div className="border border-slate-200 rounded-xl p-4">
                   <h4 className="font-semibold text-slate-800 flex items-center gap-2 mb-4">
-                    <Barcode size={18} className="text-indigo-600" />
+                    <Barcode size={18} className="text-indigo-600"/>
                     Identificación
                   </h4>
 
@@ -2621,31 +1805,16 @@ const Inventory: React.FC<InventoryProps> = ({
                       </label>
 
                       <div className="flex gap-2">
-                        <input
-                          type="text"
-                          placeholder="INV-1234567"
-                          className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono"
-                          value={formData.code || ''}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              code: e.target.value,
-                            })
-                          }
-                        />
+                        <input type="text" placeholder="INV-1234567" className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono" value={formData.code || ''} onChange={(e) => setFormData({
+                    ...formData,
+                    code: e.target.value,
+                })}/>
 
-                        <button
-                          type="button"
-                          title="Generar nuevo SKU"
-                          onClick={() =>
-                            setFormData({
-                              ...formData,
-                              code: generateSku(),
-                            })
-                          }
-                          className="px-3 border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-600"
-                        >
-                          <RefreshCw size={18} />
+                        <button type="button" title="Generar nuevo SKU" onClick={() => setFormData({
+                    ...formData,
+                    code: generateSku(),
+                })} className="px-3 border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-600">
+                          <RefreshCw size={18}/>
                         </button>
                       </div>
 
@@ -2660,27 +1829,8 @@ const Inventory: React.FC<InventoryProps> = ({
                       </label>
 
                       <div className="flex gap-2">
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          readOnly
-                          className="flex-1 min-w-0 border border-emerald-300 bg-emerald-50 rounded-lg p-2 font-mono font-bold text-emerald-800"
-                          value={formData.shortCode || ''}
-                        />
+                        <input type="text" inputMode="numeric" readOnly className="flex-1 min-w-0 border border-emerald-300 bg-emerald-50 rounded-lg p-2 font-mono font-bold text-emerald-800" value={formData.shortCode || ''}/>
 
-                        <button
-                          type="button"
-                          title="Generar otro código corto"
-                          onClick={() =>
-                            setFormData({
-                              ...formData,
-                              shortCode: generateShortCode(),
-                            })
-                          }
-                          className="px-3 border border-emerald-300 rounded-lg hover:bg-emerald-50 text-emerald-700"
-                        >
-                          <RefreshCw size={18} />
-                        </button>
                       </div>
 
                       <p className="text-[11px] text-slate-400 mt-1">
@@ -2694,32 +1844,16 @@ const Inventory: React.FC<InventoryProps> = ({
                       </label>
 
                       <div className="flex gap-2">
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          placeholder="Código del fabricante o generado"
-                          className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono"
-                          value={formData.barcode || ''}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              barcode: e.target.value.trim(),
-                            })
-                          }
-                        />
+                        <input type="text" inputMode="numeric" placeholder="Código del fabricante o generado" className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none font-mono" value={formData.barcode || ''} onChange={(e) => setFormData({
+                    ...formData,
+                    barcode: e.target.value.trim(),
+                })}/>
 
-                        <button
-                          type="button"
-                          title="Generar código de barras"
-                          onClick={() =>
-                            setFormData({
-                              ...formData,
-                              barcode: generateInternalBarcode(),
-                            })
-                          }
-                          className="px-3 border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-600"
-                        >
-                          <RefreshCw size={18} />
+                        <button type="button" title="Generar código de barras" onClick={() => setFormData({
+                    ...formData,
+                    barcode: generateInternalBarcode(),
+                })} className="px-3 border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-600">
+                          <RefreshCw size={18}/>
                         </button>
                       </div>
 
@@ -2728,12 +1862,9 @@ const Inventory: React.FC<InventoryProps> = ({
                       </p>
                     </div>
                   </div>
-                </div>
-
-                ) : (
-                  <div className="border border-indigo-200 bg-indigo-50 rounded-xl p-4">
+                </div>) : (<div className="border border-indigo-200 bg-indigo-50 rounded-xl p-4">
                     <div className="font-semibold text-indigo-900 flex items-center gap-2">
-                      <Barcode size={18} />
+                      <Barcode size={18}/>
                       Identificación automática
                     </div>
 
@@ -2742,10 +1873,9 @@ const Inventory: React.FC<InventoryProps> = ({
                       y un código de barras diferente para cada combinación de talle
                       y color. Luego podrás editar cada variante individualmente.
                     </p>
-                  </div>
-                )}
+                  </div>)}
 
-                {/* DATOS DEL PRODUCTO */}
+                
                 <div className="border border-slate-200 rounded-xl p-4">
                   <h4 className="font-semibold text-slate-800 mb-4">
                     Producto
@@ -2757,45 +1887,27 @@ const Inventory: React.FC<InventoryProps> = ({
                         Nombre del Producto
                       </label>
 
-                      <input
-                        type="text"
-                        placeholder="Ej.: Remera Dry Fit"
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        value={formData.name || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            name: e.target.value,
-                          })
-                        }
-                      />
+                      <input type="text" placeholder="Ej.: Remera Dry Fit" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={formData.name || ''} onChange={(e) => setFormData({
+                ...formData,
+                name: e.target.value,
+            })}/>
                     </div>
 
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                        <Tag size={14} />
+                        <Tag size={14}/>
                         Categoría
                       </label>
 
-                      <select
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-                        value={formData.category || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            category: e.target.value,
-                          })
-                        }
-                      >
-                        {categories.length === 0 && (
-                          <option value="">Sin Categorías</option>
-                        )}
+                      <select className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" value={formData.category || ''} onChange={(e) => setFormData({
+                ...formData,
+                category: e.target.value,
+            })}>
+                        {categories.length === 0 && (<option value="">Sin Categorías</option>)}
 
-                        {categories.map((cat) => (
-                          <option key={cat.id} value={cat.name}>
+                        {categories.map((cat) => (<option key={cat.id} value={cat.name}>
                             {cat.name}
-                          </option>
-                        ))}
+                          </option>))}
                       </select>
                     </div>
                   </div>
@@ -2803,27 +1915,19 @@ const Inventory: React.FC<InventoryProps> = ({
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                        <Truck size={14} />
+                        <Truck size={14}/>
                         Proveedor
                       </label>
 
-                      <select
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-                        value={formData.provider || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            provider: e.target.value,
-                          })
-                        }
-                      >
+                      <select className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" value={formData.provider || ''} onChange={(e) => setFormData({
+                ...formData,
+                provider: e.target.value,
+            })}>
                         <option value="">Seleccionar Proveedor</option>
 
-                        {providers.map((p) => (
-                          <option key={p.id} value={p.name}>
+                        {providers.map((p) => (<option key={p.id} value={p.name}>
                             {p.name}
-                          </option>
-                        ))}
+                          </option>))}
                       </select>
                     </div>
 
@@ -2832,16 +1936,10 @@ const Inventory: React.FC<InventoryProps> = ({
                         Género / Línea
                       </label>
 
-                      <select
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white"
-                        value={formData.gender || ''}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            gender: e.target.value,
-                          })
-                        }
-                      >
+                      <select className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white" value={formData.gender || ''} onChange={(e) => setFormData({
+                ...formData,
+                gender: e.target.value,
+            })}>
                         <option value="">Sin especificar</option>
                         <option value="Unisex">Unisex</option>
                         <option value="Hombre">Hombre</option>
@@ -2856,31 +1954,21 @@ const Inventory: React.FC<InventoryProps> = ({
                         Stock mínimo
                       </label>
 
-                      <input
-                        type="number"
-                        min="0"
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        value={Number(formData.minStock ?? 3)}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            minStock:
-                              parseInt(e.target.value, 10) || 0,
-                          })
-                        }
-                      />
+                      <input type="number" min="0" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={Number(formData.minStock ?? 3)} onChange={(e) => setFormData({
+                ...formData,
+                minStock: parseInt(e.target.value, 10) || 0,
+            })}/>
                     </div>
                   </div>
                 </div>
 
-                {/* VARIANTES */}
-                {!formData.id ? (
-                  <div className="border border-indigo-200 rounded-xl overflow-hidden">
+                
+                {!formData.id ? (<div className="border border-indigo-200 rounded-xl overflow-hidden">
                     <div className="p-4 bg-indigo-50 border-b border-indigo-100">
                       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                         <div>
                           <h4 className="font-bold text-indigo-900 flex items-center gap-2">
-                            <Shirt size={18} />
+                            <Shirt size={18}/>
                             Talles, colores y cantidades
                           </h4>
 
@@ -2894,8 +1982,8 @@ const Inventory: React.FC<InventoryProps> = ({
                         <div className="text-xs font-bold text-indigo-700 bg-white border border-indigo-200 rounded-lg px-3 py-2 whitespace-nowrap">
                           {activeVariantDrafts.length}{' '}
                           {activeVariantDrafts.length === 1
-                            ? 'variante'
-                            : 'variantes'}
+                    ? 'variante'
+                    : 'variantes'}
                           {' · '}
                           {activeVariantUnits} unidad(es)
                         </div>
@@ -2906,7 +1994,7 @@ const Inventory: React.FC<InventoryProps> = ({
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                         <div>
                           <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1">
-                            <Shirt size={14} />
+                            <Shirt size={14}/>
                             Talles
                           </label>
 
@@ -2916,31 +2004,15 @@ const Inventory: React.FC<InventoryProps> = ({
 
                           <div className="flex flex-wrap gap-2">
                             {availableSizes.map((size) => {
-                              const selected =
-                                newProductSizes.some(
-                                  (item) =>
-                                    item.toLowerCase() ===
-                                    size.toLowerCase(),
-                                );
-
-                              return (
-                                <button
-                                  key={size}
-                                  type="button"
-                                  onClick={() =>
-                                    toggleSize(size)
-                                  }
-                                  className={`px-3 py-2 rounded-lg border text-sm font-semibold transition-colors ${
-                                    selected
-                                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                                      : 'bg-white border-slate-300 text-slate-700 hover:bg-indigo-50 hover:border-indigo-300'
-                                  }`}
-                                >
+                    const selected = newProductSizes.some((item) => item.toLowerCase() ===
+                        size.toLowerCase());
+                    return (<button key={size} type="button" onClick={() => toggleSize(size)} className={`px-3 py-2 rounded-lg border text-sm font-semibold transition-colors ${selected
+                            ? 'bg-indigo-600 border-indigo-600 text-white'
+                            : 'bg-white border-slate-300 text-slate-700 hover:bg-indigo-50 hover:border-indigo-300'}`}>
                                   {selected ? '✓ ' : ''}
                                   {size}
-                                </button>
-                              );
-                            })}
+                                </button>);
+                })}
                           </div>
 
                           <div className="mt-3 pt-3 border-t border-slate-100">
@@ -2949,47 +2021,28 @@ const Inventory: React.FC<InventoryProps> = ({
                             </div>
 
                             <div className="flex gap-2">
-                              <input
-                                type="text"
-                                value={newSizeInput}
-                                onChange={(e) =>
-                                  setNewSizeInput(
-                                    e.target.value,
-                                  )
-                                }
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    void addSize();
-                                  }
-                                }}
-                                placeholder="Ej.: 3XL, 38, 40..."
-                                className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                              />
+                              <input type="text" value={newSizeInput} onChange={(e) => setNewSizeInput(e.target.value)} onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void addSize();
+                    }
+                }} placeholder="Ej.: 3XL, 38, 40..." className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"/>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void addSize()
-                                }
-                                className="px-3 py-2 rounded-lg bg-slate-900 text-white font-semibold flex items-center gap-1"
-                              >
-                                <Plus size={16} />
+                              <button type="button" onClick={() => void addSize()} className="px-3 py-2 rounded-lg bg-slate-900 text-white font-semibold flex items-center gap-1">
+                                <Plus size={16}/>
                                 Nuevo
                               </button>
                             </div>
                           </div>
 
-                          {newProductSizes.length === 0 && (
-                            <p className="text-xs text-slate-400 mt-2">
+                          {newProductSizes.length === 0 && (<p className="text-xs text-slate-400 mt-2">
                               Si no seleccionás talle, se crea como talle único.
-                            </p>
-                          )}
+                            </p>)}
                         </div>
 
                         <div>
                           <label className="block text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1">
-                            <Palette size={14} />
+                            <Palette size={14}/>
                             Colores
                           </label>
 
@@ -2999,31 +2052,15 @@ const Inventory: React.FC<InventoryProps> = ({
 
                           <div className="flex flex-wrap gap-2">
                             {availableColors.map((color) => {
-                              const selected =
-                                newProductColors.some(
-                                  (item) =>
-                                    colorComparisonKey(item) ===
-                                    colorComparisonKey(color),
-                                );
-
-                              return (
-                                <button
-                                  key={color}
-                                  type="button"
-                                  onClick={() =>
-                                    toggleColor(color)
-                                  }
-                                  className={`px-3 py-2 rounded-lg border text-sm font-semibold transition-colors ${
-                                    selected
-                                      ? 'bg-indigo-600 border-indigo-600 text-white'
-                                      : 'bg-white border-slate-300 text-slate-700 hover:bg-indigo-50 hover:border-indigo-300'
-                                  }`}
-                                >
+                    const selected = newProductColors.some((item) => colorComparisonKey(item) ===
+                        colorComparisonKey(color));
+                    return (<button key={color} type="button" onClick={() => toggleColor(color)} className={`px-3 py-2 rounded-lg border text-sm font-semibold transition-colors ${selected
+                            ? 'bg-indigo-600 border-indigo-600 text-white'
+                            : 'bg-white border-slate-300 text-slate-700 hover:bg-indigo-50 hover:border-indigo-300'}`}>
                                   {selected ? '✓ ' : ''}
                                   {color}
-                                </button>
-                              );
-                            })}
+                                </button>);
+                })}
                           </div>
 
                           <div className="mt-3 pt-3 border-t border-slate-100">
@@ -3032,42 +2069,23 @@ const Inventory: React.FC<InventoryProps> = ({
                             </div>
 
                             <div className="flex gap-2">
-                              <input
-                                type="text"
-                                value={newColorInput}
-                                onChange={(e) =>
-                                  setNewColorInput(
-                                    e.target.value,
-                                  )
-                                }
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    void addColor();
-                                  }
-                                }}
-                                placeholder="Ej.: Turquesa, Bordó..."
-                                className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                              />
+                              <input type="text" value={newColorInput} onChange={(e) => setNewColorInput(e.target.value)} onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void addColor();
+                    }
+                }} placeholder="Ej.: Turquesa, Bordó..." className="flex-1 min-w-0 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"/>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void addColor()
-                                }
-                                className="px-3 py-2 rounded-lg bg-slate-900 text-white font-semibold flex items-center gap-1"
-                              >
-                                <Plus size={16} />
+                              <button type="button" onClick={() => void addColor()} className="px-3 py-2 rounded-lg bg-slate-900 text-white font-semibold flex items-center gap-1">
+                                <Plus size={16}/>
                                 Nuevo
                               </button>
                             </div>
                           </div>
 
-                          {newProductColors.length === 0 && (
-                            <p className="text-xs text-slate-400 mt-2">
+                          {newProductColors.length === 0 && (<p className="text-xs text-slate-400 mt-2">
                               Si no seleccionás color, se crea sin color específico.
-                            </p>
-                          )}
+                            </p>)}
                         </div>
                       </div>
 
@@ -3094,11 +2112,7 @@ const Inventory: React.FC<InventoryProps> = ({
                           </div>
 
                           <div className="divide-y divide-slate-100 max-h-[330px] overflow-y-auto">
-                            {variantDrafts.map((variant) => (
-                              <div
-                                key={variant.key}
-                                className="grid grid-cols-[1fr_105px_42px] sm:grid-cols-[1fr_1fr_150px_56px] gap-2 items-center px-3 py-3 bg-white"
-                              >
+                            {variantDrafts.map((variant) => (<div key={variant.key} className="grid grid-cols-[1fr_105px_42px] sm:grid-cols-[1fr_1fr_150px_56px] gap-2 items-center px-3 py-3 bg-white">
                                 <div className="min-w-0">
                                   <div className="sm:hidden text-[10px] uppercase font-bold text-slate-400">
                                     Variante
@@ -3118,66 +2132,33 @@ const Inventory: React.FC<InventoryProps> = ({
                                 </div>
 
                                 <div>
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={variant.stock}
-                                    onChange={(e) =>
-                                      setVariantDrafts((prev) =>
-                                        prev.map((item) =>
-                                          item.key === variant.key
-                                            ? {
-                                                ...item,
-                                                stock: Math.max(
-                                                  0,
-                                                  parseInt(
-                                                    e.target.value,
-                                                    10,
-                                                  ) || 0,
-                                                ),
-                                              }
-                                            : item,
-                                        ),
-                                      )
-                                    }
-                                    className="w-full border border-slate-300 rounded-lg px-2 py-2 text-right font-bold"
-                                    aria-label={`Stock inicial ${variant.size} ${variant.color}`}
-                                  />
+                                  <input type="number" min="0" value={variant.stock} onChange={(e) => setVariantDrafts((prev) => prev.map((item) => item.key === variant.key
+                        ? {
+                            ...item,
+                            stock: Math.max(0, parseInt(e.target.value, 10) || 0),
+                        }
+                        : item))} className="w-full border border-slate-300 rounded-lg px-2 py-2 text-right font-bold" aria-label={`Stock inicial ${variant.size} ${variant.color}`}/>
                                 </div>
 
                                 <div className="flex justify-center">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      deleteVariantCombination(variant.key)
-                                    }
-                                    className="p-2 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700"
-                                    title={`Eliminar ${variant.size || 'talle único'} / ${variant.color || 'sin color'}`}
-                                  >
-                                    <Trash2 size={17} />
+                                  <button type="button" onClick={() => deleteVariantCombination(variant.key)} className="p-2 rounded-lg text-red-500 hover:bg-red-50 hover:text-red-700" title={`Eliminar ${variant.size || 'talle único'} / ${variant.color || 'sin color'}`}>
+                                    <Trash2 size={17}/>
                                   </button>
                                 </div>
-                              </div>
-                            ))}
+                              </div>))}
                           </div>
                         </div>
 
-                        {excludedVariantKeys.length > 0 && (
-                          <div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                        {excludedVariantKeys.length > 0 && (<div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
                             <div className="text-sm text-amber-800">
                               Eliminaste <b>{excludedVariantKeys.length}</b>{' '}
                               combinación(es). No se crearán.
                             </div>
 
-                            <button
-                              type="button"
-                              onClick={restoreVariantCombinations}
-                              className="text-xs font-bold px-3 py-2 rounded-lg bg-white border border-amber-300 text-amber-800 hover:bg-amber-100"
-                            >
+                            <button type="button" onClick={restoreVariantCombinations} className="text-xs font-bold px-3 py-2 rounded-lg bg-white border border-amber-300 text-amber-800 hover:bg-amber-100">
                               Restaurar combinaciones
                             </button>
-                          </div>
-                        )}
+                          </div>)}
 
                         <div className="mt-3 bg-emerald-50 border border-emerald-200 rounded-lg p-3 text-sm text-emerald-800">
                           Se crearán <b>{activeVariantDrafts.length}</b>{' '}
@@ -3187,9 +2168,7 @@ const Inventory: React.FC<InventoryProps> = ({
                         </div>
                       </div>
                     </div>
-                  </div>
-                ) : (
-                  <div className="border border-slate-200 rounded-xl p-4">
+                  </div>) : (<div className="border border-slate-200 rounded-xl p-4">
                     <h4 className="font-semibold text-slate-800 mb-1">
                       Variante
                     </h4>
@@ -3202,71 +2181,46 @@ const Inventory: React.FC<InventoryProps> = ({
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                          <Shirt size={14} />
+                          <Shirt size={14}/>
                           Talle
                         </label>
 
-                        <input
-                          type="text"
-                          className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                          value={formData.size || ''}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              size: e.target.value,
-                            })
-                          }
-                        />
+                        <input type="text" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={formData.size || ''} onChange={(e) => setFormData({
+                    ...formData,
+                    size: e.target.value,
+                })}/>
                       </div>
 
                       <div>
                         <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-1">
-                          <Palette size={14} />
+                          <Palette size={14}/>
                           Color
                         </label>
 
-                        <input
-                          type="text"
-                          className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                          value={formData.color || ''}
-                          onChange={(e) =>
-                            setFormData({
-                              ...formData,
-                              color: e.target.value,
-                            })
-                          }
-                        />
+                        <input type="text" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={formData.color || ''} onChange={(e) => setFormData({
+                    ...formData,
+                    color: e.target.value,
+                })}/>
                       </div>
                     </div>
-                  </div>
-                )}
+                  </div>)}
 
-                {/* PRECIOS Y STOCK */}
+                
                 <div className="border border-slate-200 rounded-xl p-4">
                   <h4 className="font-semibold text-slate-800 mb-4">
                     Precio y costo
                   </h4>
 
-                  <div className={`grid grid-cols-1 ${
-                    formData.id ? 'md:grid-cols-3' : 'md:grid-cols-2'
-                  } gap-4`}>
+                  <div className={`grid grid-cols-1 ${formData.id ? 'md:grid-cols-3' : 'md:grid-cols-2'} gap-4`}>
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">
                         Costo ($)
                       </label>
 
-                      <input
-                        type="number"
-                        min="0"
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        value={Number(formData.cost ?? 0)}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            cost: parseFloat(e.target.value) || 0,
-                          })
-                        }
-                      />
+                      <input type="number" min="0" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={Number(formData.cost ?? 0)} onChange={(e) => setFormData({
+                ...formData,
+                cost: parseFloat(e.target.value) || 0,
+            })}/>
                     </div>
 
                     <div>
@@ -3274,47 +2228,29 @@ const Inventory: React.FC<InventoryProps> = ({
                         Precio ($)
                       </label>
 
-                      <input
-                        type="number"
-                        min="0"
-                        className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                        value={Number(formData.price ?? 0)}
-                        onChange={(e) =>
-                          setFormData({
-                            ...formData,
-                            price: parseFloat(e.target.value) || 0,
-                          })
-                        }
-                      />
+                      <input type="number" min="0" className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={Number(formData.price ?? 0)} onChange={(e) => setFormData({
+                ...formData,
+                price: parseFloat(e.target.value) || 0,
+            })}/>
                     </div>
 
-                    {formData.id && (
-                      <div>
+                    {formData.id && (<div>
                         <label className="block text-sm font-medium text-slate-700 mb-1">
                           Stock actual
                         </label>
 
-                        <input
-                          type="number"
-                          min="0"
-                          disabled
-                          className="w-full border border-slate-300 rounded-lg p-2 bg-slate-100 text-slate-500 cursor-not-allowed"
-                          value={Number(formData.stock ?? 0)}
-                        />
+                        <input type="number" min="0" disabled className="w-full border border-slate-300 rounded-lg p-2 bg-slate-100 text-slate-500 cursor-not-allowed" value={Number(formData.stock ?? 0)}/>
 
                         <p className="text-[11px] text-slate-400 mt-1">
                           Para cambiar stock usá “Ingresar Mercadería”.
                         </p>
-                      </div>
-                    )}
+                      </div>)}
                   </div>
 
-                  {!formData.id && (
-                    <p className="text-[11px] text-slate-400 mt-3">
+                  {!formData.id && (<p className="text-[11px] text-slate-400 mt-3">
                       El costo y precio se aplican inicialmente a todas las
                       variantes. Las cantidades se cargan arriba, por talle/color.
-                    </p>
-                  )}
+                    </p>)}
                 </div>
 
                 <div>
@@ -3322,38 +2258,22 @@ const Inventory: React.FC<InventoryProps> = ({
                     Descripción
                   </label>
 
-                  <input
-                    type="text"
-                    placeholder="Información adicional..."
-                    className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={(formData.description as string) || ''}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        description: e.target.value,
-                      })
-                    }
-                  />
+                  <input type="text" placeholder="Información adicional..." className="w-full border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={(formData.description as string) || ''} onChange={(e) => setFormData({
+                ...formData,
+                description: e.target.value,
+            })}/>
                 </div>
 
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1 flex items-center gap-2">
-                    <Megaphone size={16} className="text-amber-600" />
+                    <Megaphone size={16} className="text-amber-600"/>
                     Aviso en ventas / promoción
                   </label>
 
-                  <textarea
-                    rows={2}
-                    placeholder="Ej.: 10% de descuento pagando en efectivo"
-                    className="w-full border border-amber-300 bg-amber-50/40 rounded-lg p-2.5 focus:ring-2 focus:ring-amber-500 focus:outline-none resize-y"
-                    value={(formData.salesNote as string) || ''}
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        salesNote: e.target.value,
-                      })
-                    }
-                  />
+                  <textarea rows={2} placeholder="Ej.: 10% de descuento pagando en efectivo" className="w-full border border-amber-300 bg-amber-50/40 rounded-lg p-2.5 focus:ring-2 focus:ring-amber-500 focus:outline-none resize-y" value={(formData.salesNote as string) || ''} onChange={(e) => setFormData({
+                ...formData,
+                salesNote: e.target.value,
+            })}/>
 
                   <p className="text-[11px] text-slate-400 mt-1">
                     Esta leyenda se mostrará al vendedor en Caja. Es informativa: no aplica el descuento automáticamente.
@@ -3361,188 +2281,100 @@ const Inventory: React.FC<InventoryProps> = ({
                 </div>
               </div>
 
-              <div
-                className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 bg-slate-50 border-t border-slate-100 flex flex-col-reverse sm:flex-row sm:justify-between gap-3"
-                style={{
-                  paddingBottom:
-                    'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
-                }}
-              >
+              <div className="shrink-0 px-4 sm:px-6 py-3 sm:py-4 bg-slate-50 border-t border-slate-100 flex flex-col-reverse sm:flex-row sm:justify-between gap-3" style={{
+                paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+            }}>
                 <div className="text-xs text-slate-400 self-center">
                   {formData.id
-                    ? 'Editar esta ficha no modifica las demás variantes.'
-                    : `${activeVariantDrafts.length} variante(s) seleccionada(s) · ${activeVariantUnits} unidad(es) iniciales.`}
+                ? 'Editar esta ficha no modifica las demás variantes.'
+                : `${activeVariantDrafts.length} variante(s) seleccionada(s) · ${activeVariantUnits} unidad(es) iniciales.`}
                 </div>
 
                 <div className="flex justify-end gap-3 flex-wrap">
-                  {formData.id && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const savedProduct = products.find(
-                          (product) => product.id === formData.id,
-                        );
-
-                        if (savedProduct) {
-                          openProductLabel(savedProduct);
-                        }
-                      }}
-                      className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 rounded-lg font-medium flex items-center gap-2"
-                    >
-                      <Printer size={18} />
+                  {formData.id && (<button type="button" onClick={() => {
+                    const savedProduct = products.find((product) => product.id === formData.id);
+                    if (savedProduct) {
+                        openProductLabel(savedProduct);
+                    }
+                }} className="px-4 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 rounded-lg font-medium flex items-center gap-2">
+                      <Printer size={18}/>
                       Generar etiqueta
-                    </button>
-                  )}
+                    </button>)}
 
-                  <button
-                    type="button"
-                    onClick={() => setIsModalOpen(false)}
-                    className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium"
-                  >
+                  <button type="button" onClick={() => setIsModalOpen(false)} className="px-4 py-2 text-slate-600 hover:text-slate-800 font-medium">
                     Cancelar
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={handleSave}
-                    disabled={isSaving}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2 disabled:opacity-60"
-                  >
-                    {isSaving ? (
-                      <Loader2 className="animate-spin" size={18} />
-                    ) : (
-                      <Save size={18} />
-                    )}
+                  <button type="button" onClick={handleSave} disabled={isSaving} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2 disabled:opacity-60">
+                    {isSaving ? (<Loader2 className="animate-spin" size={18}/>) : (<Save size={18}/>)}
                     {formData.id
-                      ? 'Guardar'
-                      : activeVariantDrafts.length === 1
-                        ? 'Crear Producto'
-                        : `Crear ${activeVariantDrafts.length} Variantes`}
+                ? 'Guardar'
+                : activeVariantDrafts.length === 1
+                    ? 'Crear Producto'
+                    : `Crear ${activeVariantDrafts.length} Variantes`}
                   </button>
                 </div>
               </div>
             </div>
           </div>
-        </Portal>
-      )}
+        </Portal>)}
 
-      {/* CATEGORY MODAL */}
-      {currentUser.role === 'admin' && isCategoryModalOpen && (
-        <Portal>
+      
+      {currentUser.role === 'admin' && isCategoryModalOpen && (<Portal>
           <div className="fixed inset-0 bg-black/50 z-[9999] sm:flex sm:items-center sm:justify-center sm:p-4">
             <div className="bg-white w-full h-[100dvh] sm:h-auto sm:max-h-[90dvh] sm:max-w-lg sm:rounded-xl shadow-xl overflow-hidden animate-fade-in-up flex flex-col">
               <div className="shrink-0 px-4 sm:px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                  <FolderCog size={20} className="text-slate-700" />
+                  <FolderCog size={20} className="text-slate-700"/>
                   Categorías
                 </h3>
 
-                <button
-                  type="button"
-                  onClick={() => setIsCategoryModalOpen(false)}
-                  className="text-slate-400 hover:text-slate-600"
-                >
-                  <X size={20} />
+                <button type="button" onClick={() => setIsCategoryModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                  <X size={20}/>
                 </button>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-6 space-y-4">
                 <div className="sticky top-0 z-10 -mx-1 p-1 bg-white/95 backdrop-blur">
                   <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    placeholder="Nueva categoría..."
-                    className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                    value={newCategoryName}
-                    onChange={(e) =>
-                      setNewCategoryName(e.target.value)
-                    }
-                  />
+                  <input type="text" placeholder="Nueva categoría..." className="flex-1 border border-slate-300 rounded-lg p-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)}/>
 
-                  <button
-                    type="button"
-                    onClick={handleAddCategory}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2"
-                  >
-                    <Plus size={18} />
+                  <button type="button" onClick={handleAddCategory} className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-medium flex items-center gap-2">
+                    <Plus size={18}/>
                     Agregar
                   </button>
                   </div>
                 </div>
 
                 <div className="border border-slate-200 rounded-lg overflow-hidden">
-                  {categories.length === 0 ? (
-                    <div className="p-4 text-sm text-slate-500">
+                  {categories.length === 0 ? (<div className="p-4 text-sm text-slate-500">
                       No hay categorías cargadas.
-                    </div>
-                  ) : (
-                    <div className="divide-y divide-slate-100 max-h-[52dvh] sm:max-h-[48vh] overflow-y-auto">
+                    </div>) : (<div className="divide-y divide-slate-100 max-h-[52dvh] sm:max-h-[48vh] overflow-y-auto">
                       {categories.map((cat) => {
-                        const isEditing =
-                          editingCategoryId === cat.id;
-
-                        return (
-                          <div
-                            key={cat.id}
-                            className="p-3 hover:bg-slate-50"
-                          >
-                            {isEditing ? (
-                              <div className="space-y-2">
+                    const isEditing = editingCategoryId === cat.id;
+                    return (<div key={cat.id} className="p-3 hover:bg-slate-50">
+                            {isEditing ? (<div className="space-y-2">
                                 <div className="flex flex-col sm:flex-row gap-2">
-                                  <input
-                                    type="text"
-                                    autoFocus
-                                    value={editingCategoryName}
-                                    disabled={isSavingCategory}
-                                    onChange={(e) =>
-                                      setEditingCategoryName(
-                                        e.target.value,
-                                      )
-                                    }
-                                    onKeyDown={(e) => {
-                                      if (e.key === 'Enter') {
-                                        e.preventDefault();
-                                        void handleRenameCategory(cat);
-                                      }
-
-                                      if (e.key === 'Escape') {
-                                        e.preventDefault();
-                                        cancelEditCategory();
-                                      }
-                                    }}
-                                    className="flex-1 min-w-0 border border-indigo-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"
-                                  />
+                                  <input type="text" autoFocus value={editingCategoryName} disabled={isSavingCategory} onChange={(e) => setEditingCategoryName(e.target.value)} onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    void handleRenameCategory(cat);
+                                }
+                                if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    cancelEditCategory();
+                                }
+                            }} className="flex-1 min-w-0 border border-indigo-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-indigo-500 focus:outline-none"/>
 
                                   <div className="grid grid-cols-2 sm:flex gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={cancelEditCategory}
-                                      disabled={isSavingCategory}
-                                      className="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50 flex items-center justify-center gap-1"
-                                    >
-                                      <X size={16} />
+                                    <button type="button" onClick={cancelEditCategory} disabled={isSavingCategory} className="px-3 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold disabled:opacity-50 flex items-center justify-center gap-1">
+                                      <X size={16}/>
                                       Cancelar
                                     </button>
 
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        void handleRenameCategory(cat)
-                                      }
-                                      disabled={
-                                        isSavingCategory ||
-                                        !editingCategoryName.trim()
-                                      }
-                                      className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold disabled:opacity-50 flex items-center justify-center gap-1"
-                                    >
-                                      {isSavingCategory ? (
-                                        <Loader2
-                                          size={16}
-                                          className="animate-spin"
-                                        />
-                                      ) : (
-                                        <Save size={16} />
-                                      )}
+                                    <button type="button" onClick={() => void handleRenameCategory(cat)} disabled={isSavingCategory ||
+                                !editingCategoryName.trim()} className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold disabled:opacity-50 flex items-center justify-center gap-1">
+                                      {isSavingCategory ? (<Loader2 size={16} className="animate-spin"/>) : (<Save size={16}/>)}
                                       Guardar
                                     </button>
                                   </div>
@@ -3553,58 +2385,33 @@ const Inventory: React.FC<InventoryProps> = ({
                                   también en todos los productos que tengan
                                   esta categoría.
                                 </p>
-                              </div>
-                            ) : (
-                              <div className="flex items-center justify-between gap-3">
+                              </div>) : (<div className="flex items-center justify-between gap-3">
                                 <span className="text-sm font-medium text-slate-800 min-w-0 truncate">
                                   {cat.name}
                                 </span>
 
                                 <div className="flex items-center gap-1 shrink-0">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      startEditCategory(cat)
-                                    }
-                                    className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors p-1.5 rounded"
-                                    title="Modificar categoría"
-                                  >
-                                    <Edit2 size={18} />
+                                  <button type="button" onClick={() => startEditCategory(cat)} className="text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors p-1.5 rounded" title="Modificar categoría">
+                                    <Edit2 size={18}/>
                                   </button>
 
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleDeleteCategory(cat.id)
-                                    }
-                                    className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded"
-                                    title="Eliminar categoría"
-                                  >
-                                    <Trash2 size={18} />
+                                  <button type="button" onClick={() => handleDeleteCategory(cat.id)} className="text-red-500 hover:text-red-700 hover:bg-red-50 transition-colors p-1.5 rounded" title="Eliminar categoría">
+                                    <Trash2 size={18}/>
                                   </button>
                                 </div>
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                              </div>)}
+                          </div>);
+                })}
+                    </div>)}
                 </div>
 
-                {categoryMessage && (
-                  <div
-                    className={`rounded-lg px-3 py-2 text-sm ${
-                      categoryMessage.toLowerCase().includes('no se pudo') ||
-                      categoryMessage.toLowerCase().includes('ya existe') ||
-                      categoryMessage.toLowerCase().includes('vacío')
-                        ? 'bg-red-50 border border-red-200 text-red-700'
-                        : 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-                    }`}
-                  >
+                {categoryMessage && (<div className={`rounded-lg px-3 py-2 text-sm ${categoryMessage.toLowerCase().includes('no se pudo') ||
+                    categoryMessage.toLowerCase().includes('ya existe') ||
+                    categoryMessage.toLowerCase().includes('vacío')
+                    ? 'bg-red-50 border border-red-200 text-red-700'
+                    : 'bg-emerald-50 border border-emerald-200 text-emerald-700'}`}>
                     {categoryMessage}
-                  </div>
-                )}
+                  </div>)}
 
                 <p className="text-[11px] text-slate-400">
                   Modificar una categoría actualiza automáticamente todos los
@@ -3613,35 +2420,19 @@ const Inventory: React.FC<InventoryProps> = ({
                 </p>
               </div>
 
-              <div
-                className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4"
-                style={{
-                  paddingBottom:
-                    'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => setIsCategoryModalOpen(false)}
-                  className="w-full py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold"
-                >
+              <div className="shrink-0 border-t border-slate-200 bg-white p-3 sm:p-4" style={{
+                paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom, 0px))',
+            }}>
+                <button type="button" onClick={() => setIsCategoryModalOpen(false)} className="w-full py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold">
                   Cerrar
                 </button>
               </div>
             </div>
           </div>
-        </Portal>
-      )}
+        </Portal>)}
 
-      {/* PROVIDER MANAGEMENT */}
-      <ProviderManagementModal
-        open={isProviderModalOpen}
-        providers={providers}
-        onClose={() => setIsProviderModalOpen(false)}
-        onSaved={loadLists}
-      />
-    </div>
-  );
+      
+      <ProviderManagementModal open={isProviderModalOpen} providers={providers} onClose={() => setIsProviderModalOpen(false)} onSaved={loadLists}/>
+    </div>);
 };
-
 export default Inventory;
