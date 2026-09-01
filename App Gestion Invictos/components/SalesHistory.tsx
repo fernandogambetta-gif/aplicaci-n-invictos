@@ -1905,6 +1905,20 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                             )}
                           </div>
 
+                          {sale.checkoutReturns?.length > 0 && (
+                            <div className="mt-2 pt-2 border-t border-amber-100 space-y-1">
+                              {sale.checkoutReturns.map((credit) => (
+                                <div key={credit.id} className="text-[11px] text-amber-800 bg-amber-50 rounded-lg px-2 py-1.5">
+                                  <span className="font-bold">DEVUELVE:</span>{' '}
+                                  {credit.returnedItem.quantity}× {credit.returnedItem.productName}
+                                  {credit.returnedItem.size ? ` · T. ${credit.returnedItem.size}` : ''}
+                                  {credit.returnedItem.color ? ` · ${credit.returnedItem.color}` : ''}
+                                  {' · '}crédito ${money(credit.originalPaidAmount)}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
                           {adjustments.length > 0 && (
                             <div className="mt-2 pt-2 border-t border-slate-100 space-y-1.5">
                               {adjustments.map((adjustment) => (
@@ -1968,18 +1982,27 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                         </Td>
 
                         <Td>
-                          {paymentLabel(
-                            sale.paymentMethod,
-                          )}
+                          {Number(sale.settlementTotal) < -0.009
+                            ? `Devolución · ${paymentLabel(sale.refundMethod || 'cash')}`
+                            : Math.abs(Number(sale.settlementTotal || 0)) < 0.01 && sale.checkoutReturns?.length
+                              ? 'Sin diferencia'
+                              : paymentLabel(sale.paymentMethod)}
                         </Td>
 
                         <Td align="right">
-                          <span className="font-bold">
-                            $
-                            {money(
-                              netTotal,
-                            )}
-                          </span>
+                          <div className="font-bold">
+                            ${money(netTotal)}
+                          </div>
+                          {sale.checkoutReturns?.length > 0 && (
+                            <div className="text-[11px] text-slate-500 mt-1">
+                              Caja:{' '}
+                              {Number(sale.settlementTotal || 0) < -0.009
+                                ? `devuelve $${money(Math.abs(Number(sale.settlementTotal || 0)))}`
+                                : Number(sale.settlementTotal || 0) > 0.009
+                                  ? `cobra $${money(Number(sale.settlementTotal || 0))}`
+                                  : '$0'}
+                            </div>
+                          )}
                         </Td>
 
                         {isAdmin && (
