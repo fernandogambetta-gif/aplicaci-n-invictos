@@ -391,6 +391,9 @@ export type ExpenseCategory =
   | 'marketing'
   | 'transport'
   | 'maintenance'
+  // Es una salida de caja / inversión en inventario, no un gasto operativo.
+  // El costo de esa mercadería impacta en rentabilidad cuando se vende.
+  | 'inventory_purchase'
   | 'other';
 
 export interface Expense {
