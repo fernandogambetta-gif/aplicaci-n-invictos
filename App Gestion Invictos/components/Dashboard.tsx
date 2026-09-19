@@ -191,7 +191,15 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
   // --- CHART DATA (Revenue by day/group) ---
   const chartData = useMemo(() => {
     const grouped: Record<string, number> = {};
-    filteredSales.forEach(sale => {
+
+    // getSales() entrega el historial de más nuevo a más antiguo.
+    // Para una evolución temporal la gráfica debe leerse al revés:
+    // fecha/hora más antigua a la izquierda y la más reciente a la derecha.
+    const chronologicalSales = [...filteredSales].sort(
+      (a, b) => a.timestamp - b.timestamp,
+    );
+
+    chronologicalSales.forEach(sale => {
         const date = new Date(sale.timestamp);
         let key = '';
         if (timeRange === 'today') key = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
