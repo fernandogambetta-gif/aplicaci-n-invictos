@@ -77,8 +77,12 @@ const EXPENSE_LABELS: Record<ExpenseCategory, string> = {
   marketing: 'Publicidad / Marketing',
   transport: 'Transporte / Envíos',
   maintenance: 'Mantenimiento',
+  inventory_purchase: 'Compra de mercadería / stock (inversión)',
   other: 'Otros',
 };
+
+const isOperatingExpense = (expense: Expense): boolean =>
+  expense.category !== 'inventory_purchase';
 
 const money = (value: number): string =>
   Number(value || 0).toLocaleString('es-AR', {
@@ -797,15 +801,28 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
     const contribution =
       grossMargin - commissions;
 
+    // Las compras de mercadería son inversión en inventario, no gasto operativo.
+    // Su costo ya impacta en la rentabilidad mediante el costo histórico de
+    // la mercadería efectivamente vendida. Descontarlas aquí otra vez
+    // produciría una doble imputación.
+    const stockInvestment = periodExpenses
+      .filter((expense) => expense.category === 'inventory_purchase')
+      .reduce(
+        (acc, expense) => acc + Number(expense.amount || 0),
+        0,
+      );
+
     // Los gastos generales solo se descuentan cuando se analiza
     // el negocio completo. No se adjudican a un vendedor individual.
     const operatingExpenses =
       isAdmin && sellerFilter === 'ALL'
-        ? periodExpenses.reduce(
-            (acc, expense) =>
-              acc + Number(expense.amount || 0),
-            0,
-          )
+        ? periodExpenses
+            .filter(isOperatingExpense)
+            .reduce(
+              (acc, expense) =>
+                acc + Number(expense.amount || 0),
+              0,
+            )
         : 0;
 
     return {
@@ -818,6 +835,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
       commissions,
       contribution,
       operatingExpenses,
+      stockInvestment,
       operatingResult:
         contribution - operatingExpenses,
       estimatedCostItems,
@@ -1500,8 +1518,9 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
 
         {isAdmin && (
           <div className="mt-2 text-xs text-slate-500">
-            Los gastos operativos se imputan por mes. En este filtro se consideran
-            únicamente los meses completos incluidos en el período:
+            Los gastos operativos se imputan por mes. Las compras de stock se
+            muestran como inversión y no reducen el resultado operativo. En este
+            filtro se consideran únicamente los meses completos incluidos en el período:
             {' '}
             <b>
               {fullMonthsInRange.length > 0
@@ -1592,12 +1611,22 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
             {analyzingWholeBusiness && (
               <>
                 <SummaryCard
-                  label="Gastos operativos"
+                  label="Gastos / inversiones"
                   value={`$${money(
                     summary.operatingExpenses,
                   )}`}
                   sub="Alquiler, energía, personal, etc."
                 />
+
+                {summary.stockInvestment > 0 && (
+                  <SummaryCard
+                    label="Compras de stock"
+                    value={`$${money(
+                      summary.stockInvestment,
+                    )}`}
+                    sub="Inversión · no reduce la rentabilidad"
+                  />
+                )}
 
                 <SummaryCard
                   label="Resultado operativo"
@@ -2333,14 +2362,13 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
             <div className="bg-white border border-slate-200 rounded-2xl shadow-sm p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div>
                 <div className="font-bold text-slate-800">
-                  Gastos operativos
+                  Gastos operativos y compras de stock
                 </div>
 
                 <div className="text-sm text-slate-500 mt-1">
-                  Alquiler, energía,
-                  personal, impuestos,
-                  servicios y otros costos
-                  del negocio.
+                  Los gastos operativos reducen el resultado. Las compras de
+                  mercadería son inversión en inventario y se muestran por
+                  separado para no descontarlas dos veces.
                 </div>
               </div>
 
@@ -2403,43 +2431,60 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                   className="px-4 py-2.5 rounded-xl bg-indigo-600 text-white font-bold flex items-center gap-2"
                 >
                   <Plus size={18} />
-                  Nuevo gasto
+                  Nuevo gasto / inversión
                 </button>
               </div>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-              <div className="p-4 border-b border-slate-200 flex justify-between gap-4">
+              <div className="p-4 border-b border-slate-200 grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <div className="text-xs uppercase font-bold text-slate-400">
-                    Total gastos del
-                    período
+                    Gastos operativos del período
                   </div>
 
                   <div className="text-2xl font-black text-slate-900 mt-1">
                     $
                     {money(
-                      periodExpenses.reduce(
-                        (acc, e) =>
-                          acc +
-                          Number(
-                            e.amount || 0,
-                          ),
-                        0,
-                      ),
+                      periodExpenses
+                        .filter(isOperatingExpense)
+                        .reduce(
+                          (acc, e) => acc + Number(e.amount || 0),
+                          0,
+                        ),
                     )}
                   </div>
                 </div>
 
-                <div className="text-right">
+                <div>
+                  <div className="text-xs uppercase font-bold text-slate-400">
+                    Compras de stock · inversión
+                  </div>
+
+                  <div className="text-2xl font-black text-slate-900 mt-1">
+                    $
+                    {money(
+                      periodExpenses
+                        .filter((e) => e.category === 'inventory_purchase')
+                        .reduce(
+                          (acc, e) => acc + Number(e.amount || 0),
+                          0,
+                        ),
+                    )}
+                  </div>
+
+                  <div className="text-[11px] text-slate-500 mt-1">
+                    No se descuenta del resultado operativo.
+                  </div>
+                </div>
+
+                <div className="sm:text-right">
                   <div className="text-xs uppercase font-bold text-slate-400">
                     Registros visibles
                   </div>
 
                   <div className="text-2xl font-black text-slate-900 mt-1">
-                    {
-                      visibleExpenses.length
-                    }
+                    {visibleExpenses.length}
                   </div>
                 </div>
               </div>
@@ -2637,8 +2682,8 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                 <div>
                   <h3 className="text-lg font-bold text-slate-900">
                     {editingExpense
-                      ? 'Editar gasto'
-                      : 'Nuevo gasto operativo'}
+                      ? 'Editar gasto / inversión'
+                      : 'Nuevo gasto / inversión'}
                   </h3>
 
                   <p className="text-xs text-slate-500 mt-1">
@@ -2749,6 +2794,14 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                       ),
                     )}
                   </select>
+
+                  {expenseCategory === 'inventory_purchase' && (
+                    <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+                      Esta compra se considera inversión en inventario. No se
+                      descontará de la rentabilidad del mes; el costo de la
+                      mercadería se reconocerá cuando se venda.
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -2776,7 +2829,10 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                           : expenseCategory ===
                               'rent'
                             ? 'Ej.: Alquiler - Agosto 2026'
-                            : 'Detalle del gasto'
+                            : expenseCategory ===
+                                'inventory_purchase'
+                              ? 'Ej.: Reposición de mercadería - Septiembre 2026'
+                              : 'Detalle del gasto'
                     }
                     className="w-full border border-slate-300 rounded-xl px-3 py-2.5"
                   />
