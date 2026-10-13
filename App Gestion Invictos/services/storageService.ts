@@ -1459,9 +1459,92 @@ export const StorageService = {
 
     const snap = await getDocs(collection(db, COLLECTIONS.SALES));
 
-    return mapDocs<Sale>(snap).sort(
+    return mapDocs<Sale>(snap).filter((sale) => !sale.cancellation).sort(
       (a, b) => b.timestamp - a.timestamp,
     );
+  },
+
+  getCancelledSales: async (adminId: string): Promise<Sale[]> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(adminId);
+    const snap = await getDocs(collection(db, COLLECTIONS.SALES));
+    return mapDocs<Sale>(snap).filter((sale) => !!sale.cancellation)
+      .sort((a, b) => b.cancellation!.timestamp - a.cancellation!.timestamp);
+  },
+
+  cancelSale: async (
+    saleId: string,
+    adminId: string,
+    confirmationPin: string,
+    reason: string,
+    moneyReviewed: boolean,
+  ): Promise<void> => {
+    const firestore = db;
+    if (!firestore) throw new Error('Firestore no inicializado');
+    const cleanReason = reason.trim();
+    if (cleanReason.length < 5 || cleanReason.length > 1000) {
+      throw new Error('Ingresá un motivo de entre 5 y 1000 caracteres.');
+    }
+    if (!moneyReviewed) throw new Error('Confirmá la revisión del dinero y la mercadería.');
+    await runTransaction(firestore, async (transaction) => {
+      // Rol y PIN se releen junto con la venta; no se confía en el rol de la pantalla.
+      const adminSnap = await transaction.get(doc(firestore, COLLECTIONS.USERS, adminId));
+      if (!adminSnap.exists()) throw new Error('Administrador inexistente.');
+      const admin = adminSnap.data() as User;
+      if (admin.role !== 'admin' || admin.security?.isPermanentlyBlocked ||
+          Number(admin.security?.lockoutUntil || 0) > Date.now()) {
+        throw new Error('Esta operación requiere un administrador habilitado.');
+      }
+      if (!confirmationPin.trim() || confirmationPin.trim() !== String(admin.pin || '').trim()) {
+        throw new Error('PIN de administrador incorrecto.');
+      }
+      const saleRef = doc(firestore, COLLECTIONS.SALES, saleId);
+      const saleSnap = await transaction.get(saleRef);
+      if (!saleSnap.exists()) throw new Error('No se encontró la venta.');
+      const sale = saleSnap.data() as Sale;
+      if (sale.cancellation) return; // Reintento: nunca devuelve el stock dos veces.
+      if (sale.adjustments?.length || sale.checkoutReturns?.length ||
+          sale.operationType === 'sale_with_return' || sale.operationType === 'return_only') {
+        throw new Error('Esta venta tiene cambios o devoluciones vinculados. Requiere revisar esas operaciones antes de anularla; no se modificó ningún dato.');
+      }
+      if (sale.commissionPaid) {
+        throw new Error('Esta venta tiene comisiones liquidadas. Revisá la liquidación antes de anularla; no se modificó ningún dato.');
+      }
+      if (!Array.isArray(sale.items) || !sale.items.length) throw new Error('La venta no tiene productos válidos para restituir.');
+      const quantities = new Map<string, number>();
+      for (const item of sale.items) {
+        const quantity = Number(item.quantity);
+        if (!item.productId || !Number.isInteger(quantity) || quantity <= 0) throw new Error('La venta contiene una cantidad o producto inválido.');
+        quantities.set(item.productId, (quantities.get(item.productId) || 0) + quantity);
+      }
+      if (quantities.size > 200) throw new Error('Demasiados productos para anular en una sola operación.');
+      const products: Array<{ id: string; product: Product; quantity: number }> = [];
+      for (const [id, quantity] of quantities) {
+        const snap = await transaction.get(doc(firestore, COLLECTIONS.PRODUCTS, id));
+        if (!snap.exists()) throw new Error('Un producto de esta venta ya no existe. Debe recuperarse antes de anular; no se modificó ningún dato.');
+        const product = snap.data() as Product;
+        if (!Number.isFinite(Number(product.stock))) throw new Error('Un producto tiene stock inválido.');
+        products.push({ id, product, quantity });
+      }
+      const now = Date.now();
+      for (const { id, product, quantity } of products) {
+        const previousStock = Number(product.stock);
+        const newStock = previousStock + quantity;
+        transaction.update(doc(firestore, COLLECTIONS.PRODUCTS, id), { stock: newStock, updatedAt: now });
+        const movementRef = doc(collection(firestore, COLLECTIONS.INVENTORY_MOVEMENTS));
+        transaction.set(movementRef, cleanData({
+          id: movementRef.id, productId: id, productName: product.name,
+          productCode: product.code, size: product.size, color: product.color,
+          type: 'CANCELLED_SALE', quantityChange: quantity, previousStock, newStock,
+          timestamp: now, userId: adminId, userName: admin.name,
+          referenceId: saleId, note: `Anulación de venta: ${cleanReason}`,
+        }));
+      }
+      transaction.update(saleRef, { cancellation: {
+        timestamp: now, userId: adminId, userName: admin.name,
+        reason: cleanReason, moneyReviewed: true, stockRestored: true,
+      } });
+    });
   },
 
   /**
@@ -1523,6 +1606,8 @@ export const StorageService = {
     });
 
     await runTransaction(db, async (transaction) => {
+      const existingSale = await transaction.get(doc(db!, COLLECTIONS.SALES, sale.id));
+      if (existingSale.exists()) throw new Error('La venta ya está registrada. Actualizá la pantalla antes de volver a cargarla.');
       const productIds = new Set<string>();
 
       sale.items.forEach((item) => {
@@ -1609,6 +1694,7 @@ export const StorageService = {
         if (!snap?.exists()) {
           throw new Error(`La venta original ${saleId} ya no existe.`);
         }
+        if ((snap.data() as Sale).cancellation) throw new Error('La venta original está anulada.');
         originalSaleStates.set(saleId, {
           ...(snap.data() as Sale),
           id: snap.id,
@@ -2202,6 +2288,7 @@ export const StorageService = {
       }
 
       const saleData = saleSnap.data() as Sale;
+      if (saleData.cancellation) throw new Error('La venta está anulada; no admite cobros.');
       const receivable = saleData.receivable;
 
       if (!receivable) {
@@ -2352,6 +2439,7 @@ export const StorageService = {
       }
 
       const sale = saleSnap.data() as Sale;
+      if (sale.cancellation) throw new Error('La venta está anulada; no admite cambios ni devoluciones.');
       const adjustments = Array.isArray(sale.adjustments)
         ? sale.adjustments
         : [];
@@ -3255,16 +3343,21 @@ export const StorageService = {
   markCommissionsAsPaid: async (
     saleIds: string[],
   ): Promise<void> => {
-    if (!db) throw new Error('Firestore no inicializado');
+    const firestore = db;
+    if (!firestore) throw new Error('Firestore no inicializado');
 
-    await Promise.all(
-      saleIds.map((id) =>
-        updateDoc(doc(db, COLLECTIONS.SALES, id), {
-          commissionPaid: true,
-          commissionPaidDate: Date.now(),
-        }),
-      ),
-    );
+    await runTransaction(firestore, async (transaction) => {
+      const refs = [...new Set(saleIds)].map((id) => doc(firestore, COLLECTIONS.SALES, id));
+      for (const ref of refs) {
+        const snap = await transaction.get(ref);
+        if (!snap.exists() || (snap.data() as Sale).cancellation) {
+          throw new Error('Una venta fue anulada o ya no existe. Actualizá las comisiones.');
+        }
+      }
+      for (const ref of refs) transaction.update(ref, {
+        commissionPaid: true, commissionPaidDate: Date.now(),
+      });
+    });
   },
 
   /**
@@ -3306,6 +3399,9 @@ export const StorageService = {
       getDocs(collection(db, COLLECTIONS.PRODUCTS)),
     ]);
 
+    if (salesSnap.docs.some((item) => (item.data() as Sale).cancellation)) {
+      throw new Error('Hay ventas anuladas con auditoría. El reseteo masivo no está disponible para evitar borrar su historial o devolver stock dos veces.');
+    }
     if (salesSnap.empty) {
       return {
         salesDeleted: 0,
