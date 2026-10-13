@@ -1,3 +1,4 @@
+import { CancelSaleButton } from './SaleCancellation';
 import React, { useMemo, useState } from 'react';
 import {
   Sale,
@@ -623,6 +624,7 @@ const AccountsReceivablePanel: React.FC<
                           className="ml-auto text-emerald-600"
                         />
                       )}
+                      <CancelSaleButton sale={row.sale} user={currentUser} onUpdate={onUpdate} />
                     </Td>
                   </tr>
                 );
