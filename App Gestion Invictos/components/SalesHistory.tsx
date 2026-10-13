@@ -1,3 +1,4 @@
+import { CancelSaleButton, CancelledSalesAudit } from './SaleCancellation';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Sale,
@@ -1253,6 +1254,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
 
   return (
     <div className="space-y-5">
+      {isAdmin && <CancelledSalesAudit user={currentUser} />} 
       <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
@@ -2090,6 +2092,7 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                             <ArrowLeftRight size={15} />
                             Cambio / Devolución
                           </button>
+                          <CancelSaleButton sale={sale} user={currentUser} onUpdate={onUpdate} />
                         </Td>
                       </tr>
                     );
