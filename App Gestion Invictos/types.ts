@@ -323,6 +323,15 @@ export interface CheckoutReturnCredit {
 }
 
 export interface Sale {
+  // La operación original se conserva para auditoría; no participa de los reportes activos.
+  cancellation?: {
+    timestamp: number;
+    userId: string;
+    userName: string;
+    reason: string;
+    moneyReviewed: boolean;
+    stockRestored: boolean;
+  };
   id: string;
   items: SaleItem[];
 
