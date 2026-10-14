@@ -1473,6 +1473,19 @@ export const StorageService = {
       .sort((a, b) => b.cancellation!.timestamp - a.cancellation!.timestamp);
   },
 
+  getSaleCancellationPreview: async (saleId: string, adminId: string): Promise<{ sale: Sale; linkedSales: Sale[] }> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    await assertAdminUser(adminId);
+    const snap = await getDocs(collection(db, COLLECTIONS.SALES));
+    const sales = mapDocs<Sale>(snap);
+    const sale = sales.find(item => item.id === saleId);
+    if (!sale || sale.cancellation) throw new Error('La venta ya fue anulada o no existe. Actualizá el historial.');
+    const linkedSales = sales.filter(item => !item.cancellation && item.id !== saleId &&
+      item.checkoutReturns?.some(credit => credit.origin === 'registered' && credit.originalSaleId === saleId));
+    cancellationStockPlan(sale, linkedSales);
+    return { sale, linkedSales };
+  },
+
   cancelSale: async (
     saleId: string,
     adminId: string,
@@ -1481,6 +1494,7 @@ export const StorageService = {
     moneyReviewed: boolean,
     stockMode: CancellationStockMode = 'automatic',
     expectedSignature?: string,
+    reviewedLinkedSales: Array<{ id: string; signature: string }> = [],
   ): Promise<void> => {
     const firestore = db;
     if (!firestore) throw new Error('Firestore no inicializado');
@@ -1489,6 +1503,8 @@ export const StorageService = {
       throw new Error('Ingresá un motivo de entre 5 y 1000 caracteres.');
     }
     if (!moneyReviewed) throw new Error('Confirmá la revisión del dinero, las comisiones y la mercadería.');
+    if (reviewedLinkedSales.length > 40) throw new Error('Demasiadas devoluciones vinculadas para una sola operación.');
+    if (reviewedLinkedSales.length && !expectedSignature) throw new Error('Primero revisá la vista previa de todos los registros.');
     if (!['automatic', 'already_correct'].includes(stockMode)) throw new Error('Seleccioná cómo corregir el stock.');
     await runTransaction(firestore, async (transaction) => {
       // Rol y PIN se releen junto con la venta; no se confía en el rol de la pantalla.
@@ -1505,12 +1521,20 @@ export const StorageService = {
       const saleRef = doc(firestore, COLLECTIONS.SALES, saleId);
       const saleSnap = await transaction.get(saleRef);
       if (!saleSnap.exists()) throw new Error('No se encontró la venta.');
-      const sale = saleSnap.data() as Sale;
+      const sale = { ...saleSnap.data(), id: saleId } as Sale;
       if (sale.cancellation) return; // Reintento: nunca devuelve el stock dos veces.
       if (expectedSignature && cancellationSignature(sale) !== expectedSignature) {
         throw new Error('La operación cambió desde que abriste esta pantalla. Cerrá, actualizá el historial y revisala antes de anular.');
       }
-      const plan = cancellationStockPlan(sale);
+      const linkedSales: Sale[] = [];
+      for (const reviewed of reviewedLinkedSales) {
+        const linkedSnap = await transaction.get(doc(firestore, COLLECTIONS.SALES, reviewed.id));
+        if (!linkedSnap.exists()) throw new Error('Una devolución vinculada ya no existe. Actualizá el historial.');
+        const linked = { ...linkedSnap.data(), id: reviewed.id } as Sale;
+        if (cancellationSignature(linked) !== reviewed.signature) throw new Error('Una devolución cambió desde la revisión. Actualizá antes de anular.');
+        linkedSales.push(linked);
+      }
+      const plan = cancellationStockPlan(sale, linkedSales);
       const quantities = new Map<string, number>(stockMode === 'automatic'
         ? plan.map(item => [item.productId, item.quantity]) : []);
       if (quantities.size > 200) throw new Error('Demasiados productos para anular en una sola operación.');
@@ -1536,10 +1560,20 @@ export const StorageService = {
           referenceId: saleId, note: `Anulación de venta: ${cleanReason}`,
         }));
       }
+      for (const linked of linkedSales) {
+        transaction.update(doc(firestore, COLLECTIONS.SALES, linked.id), { cancellation: {
+          timestamp: now, userId: adminId, userName: admin.name,
+          reason: cleanReason, moneyReviewed: true, stockRestored: false,
+          stockMode: 'already_correct', stockChanges: [],
+          groupRootSaleId: saleId, relatedSaleIds: [saleId],
+          commissionReviewRequired: !!linked.commissionPaid,
+          commissionRecordedAtCancellation: (linked.items || []).reduce((sum, item) => sum + Number(item.commissionAmount || 0), 0),
+        } });
+      }
       transaction.update(saleRef, { cancellation: {
         timestamp: now, userId: adminId, userName: admin.name,
         reason: cleanReason, moneyReviewed: true, stockRestored: stockMode === 'automatic',
-        stockMode,
+        stockMode, groupRootSaleId: saleId, relatedSaleIds: linkedSales.map(item => item.id),
         stockChanges: products.map(({ id, quantity }) => ({ productId: id, quantity })),
         commissionReviewRequired: !!sale.commissionPaid,
         commissionRecordedAtCancellation: (sale.items || []).reduce((sum, item) => sum + Number(item.commissionAmount || 0), 0),
