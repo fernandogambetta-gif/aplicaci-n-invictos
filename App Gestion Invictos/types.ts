@@ -331,6 +331,10 @@ export interface Sale {
     reason: string;
     moneyReviewed: boolean;
     stockRestored: boolean;
+    stockMode?: 'automatic' | 'already_correct';
+    stockChanges?: Array<{ productId: string; quantity: number }>;
+    commissionReviewRequired?: boolean;
+    commissionRecordedAtCancellation?: number;
   };
   id: string;
   items: SaleItem[];
