@@ -1,3 +1,4 @@
+import { cancellationStockPlan, cancellationSignature, CancellationStockMode } from './saleCancellationPlan';
 import {
   Product,
   Sale,
@@ -1478,6 +1479,8 @@ export const StorageService = {
     confirmationPin: string,
     reason: string,
     moneyReviewed: boolean,
+    stockMode: CancellationStockMode = 'automatic',
+    expectedSignature?: string,
   ): Promise<void> => {
     const firestore = db;
     if (!firestore) throw new Error('Firestore no inicializado');
@@ -1485,7 +1488,8 @@ export const StorageService = {
     if (cleanReason.length < 5 || cleanReason.length > 1000) {
       throw new Error('Ingresá un motivo de entre 5 y 1000 caracteres.');
     }
-    if (!moneyReviewed) throw new Error('Confirmá la revisión del dinero y la mercadería.');
+    if (!moneyReviewed) throw new Error('Confirmá la revisión del dinero, las comisiones y la mercadería.');
+    if (!['automatic', 'already_correct'].includes(stockMode)) throw new Error('Seleccioná cómo corregir el stock.');
     await runTransaction(firestore, async (transaction) => {
       // Rol y PIN se releen junto con la venta; no se confía en el rol de la pantalla.
       const adminSnap = await transaction.get(doc(firestore, COLLECTIONS.USERS, adminId));
@@ -1503,20 +1507,12 @@ export const StorageService = {
       if (!saleSnap.exists()) throw new Error('No se encontró la venta.');
       const sale = saleSnap.data() as Sale;
       if (sale.cancellation) return; // Reintento: nunca devuelve el stock dos veces.
-      if (sale.adjustments?.length || sale.checkoutReturns?.length ||
-          sale.operationType === 'sale_with_return' || sale.operationType === 'return_only') {
-        throw new Error('Esta venta tiene cambios o devoluciones vinculados. Requiere revisar esas operaciones antes de anularla; no se modificó ningún dato.');
+      if (expectedSignature && cancellationSignature(sale) !== expectedSignature) {
+        throw new Error('La operación cambió desde que abriste esta pantalla. Cerrá, actualizá el historial y revisala antes de anular.');
       }
-      if (sale.commissionPaid) {
-        throw new Error('Esta venta tiene comisiones liquidadas. Revisá la liquidación antes de anularla; no se modificó ningún dato.');
-      }
-      if (!Array.isArray(sale.items) || !sale.items.length) throw new Error('La venta no tiene productos válidos para restituir.');
-      const quantities = new Map<string, number>();
-      for (const item of sale.items) {
-        const quantity = Number(item.quantity);
-        if (!item.productId || !Number.isInteger(quantity) || quantity <= 0) throw new Error('La venta contiene una cantidad o producto inválido.');
-        quantities.set(item.productId, (quantities.get(item.productId) || 0) + quantity);
-      }
+      const plan = cancellationStockPlan(sale);
+      const quantities = new Map<string, number>(stockMode === 'automatic'
+        ? plan.map(item => [item.productId, item.quantity]) : []);
       if (quantities.size > 200) throw new Error('Demasiados productos para anular en una sola operación.');
       const products: Array<{ id: string; product: Product; quantity: number }> = [];
       for (const [id, quantity] of quantities) {
@@ -1542,7 +1538,11 @@ export const StorageService = {
       }
       transaction.update(saleRef, { cancellation: {
         timestamp: now, userId: adminId, userName: admin.name,
-        reason: cleanReason, moneyReviewed: true, stockRestored: true,
+        reason: cleanReason, moneyReviewed: true, stockRestored: stockMode === 'automatic',
+        stockMode,
+        stockChanges: products.map(({ id, quantity }) => ({ productId: id, quantity })),
+        commissionReviewRequired: !!sale.commissionPaid,
+        commissionRecordedAtCancellation: (sale.items || []).reduce((sum, item) => sum + Number(item.commissionAmount || 0), 0),
       } });
     });
   },
