@@ -331,6 +331,8 @@ export interface Sale {
     reason: string;
     moneyReviewed: boolean;
     stockRestored: boolean;
+    groupRootSaleId?: string;
+    relatedSaleIds?: string[];
     stockMode?: 'automatic' | 'already_correct';
     stockChanges?: Array<{ productId: string; quantity: number }>;
     commissionReviewRequired?: boolean;
