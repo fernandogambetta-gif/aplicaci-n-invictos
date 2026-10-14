@@ -2,13 +2,39 @@ import { Sale } from '../types';
 
 export type CancellationStockMode = 'automatic' | 'already_correct';
 
-// Solo las devoluciones propias se pueden compensar sin alterar otra venta real.
-export const cancellationBlockReason = (sale: Sale): string => {
+// Se permite cancelar devoluciones puras de esta venta, nunca otra compra real.
+export const cancellationBlockReason = (sale: Sale, linkedSales: Sale[] = []): string => {
   if (sale.checkoutReturns?.length || sale.operationType === 'sale_with_return' || sale.operationType === 'return_only') {
-    return 'Esta operación aplica créditos de devolución de otras ventas en Caja. Hay que desvincular esos créditos antes de anularla; no se modificará otra venta automáticamente.';
+    return 'Esta es una operación de devolución de Caja. Abrí Anular venta desde la venta original para revisar y anular ambos registros juntos.';
   }
-  if (sale.adjustments?.some(item => String(item.id).startsWith('pos-'))) {
-    return 'Esta venta tiene una devolución utilizada como crédito en otra operación de Caja. Hay que revisar esa operación vinculada antes de anularla.';
+  const posAdjustments = (sale.adjustments || []).filter(item => String(item.id).startsWith('pos-'));
+  const matched = new Set<string>();
+  const relatedIds = new Set<string>();
+  for (const linked of linkedSales) {
+    if (!linked.id || linked.id === sale.id || relatedIds.has(linked.id)) return 'Vínculo de devolución inválido o repetido.';
+    relatedIds.add(linked.id);
+    if (linked.cancellation || linked.operationType !== 'return_only' || !Array.isArray(linked.items) || linked.items.length ||
+        Number(linked.total) !== 0 || linked.receivable || linked.adjustments?.length || !linked.checkoutReturns?.length) {
+      return `La operación ${linked.id} contiene una compra, otros ajustes o datos incompatibles. No se anulará otra venta automáticamente.`;
+    }
+    for (const credit of linked.checkoutReturns) {
+      if (credit.origin !== 'registered' || credit.originalSaleId !== sale.id) return `La devolución ${linked.id} incluye otras ventas. Requiere revisar esos vínculos.`;
+      const adjustment = posAdjustments.find(item => item.id === `pos-${credit.id}`);
+      if (!adjustment || matched.has(adjustment.id)) return 'No coincide el vínculo entre la venta y su devolución de Caja.';
+      const original = adjustment.returnedItem;
+      const returned = credit.returnedItem;
+      if (!original || !returned || original.productId !== returned.productId ||
+          Number(original.quantity) !== Number(returned.quantity) ||
+          Boolean(original.returnToStock) !== Boolean(returned.returnToStock) ||
+          Math.abs(Number(original.totalAmount) - Number(returned.totalAmount)) > 0.01 ||
+          !Number.isFinite(Number(original.totalAmount)) || !Number.isFinite(Number(returned.totalAmount))) {
+        return 'Los productos o importes de la devolución no coinciden con la venta original.';
+      }
+      matched.add(adjustment.id);
+    }
+  }
+  if (posAdjustments.some(item => !matched.has(item.id))) {
+    return 'No se encontró una devolución pura de Caja para todos los créditos vinculados. No se modificó ningún registro.';
   }
   return '';
 };
@@ -17,10 +43,11 @@ export const cancellationSignature = (sale: Sale): string => JSON.stringify([
   sale.items, sale.adjustments || [], sale.checkoutReturns || [],
   !!sale.commissionPaid, sale.commissionPaidDate || null,
   sale.receivable || null, sale.operationType || null,
+  sale.total, sale.settlementTotal, sale.settlementDirection, sale.payments, sale.refundMethod, sale.refundReceiptNumber, sale.cancellation || null,
 ]);
 
-export const cancellationStockPlan = (sale: Sale): Array<{ productId: string; productName: string; quantity: number }> => {
-  const block = cancellationBlockReason(sale);
+export const cancellationStockPlan = (sale: Sale, linkedSales: Sale[] = []): Array<{ productId: string; productName: string; quantity: number }> => {
+  const block = cancellationBlockReason(sale, linkedSales);
   if (block) throw new Error(block);
   if (!Array.isArray(sale.items) || !sale.items.length) throw new Error('La operación no contiene productos válidos.');
   const result = new Map<string, { productId: string; productName: string; quantity: number }>();
