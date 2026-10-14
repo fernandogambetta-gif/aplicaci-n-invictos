@@ -1,3 +1,4 @@
+import { cancellationStockPlan, cancellationSignature, CancellationStockMode } from '../services/saleCancellationPlan';
 import React, { useState } from 'react';
 import { Sale, User } from '../types';
 import { StorageService } from '../services/storageService';
@@ -13,14 +14,17 @@ export const CancelSaleButton: React.FC<{ sale: Sale; user: User; onUpdate?: () 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
+  const [stockMode, setStockMode] = useState<CancellationStockMode>('automatic');
   if (user.role !== 'admin') return null;
-  const blocked = sale.adjustments?.length || sale.checkoutReturns?.length || sale.commissionPaid ||
-    sale.operationType === 'sale_with_return' || sale.operationType === 'return_only';
+  let blocked = '';
+  let stockPlan: ReturnType<typeof cancellationStockPlan> = [];
+  try { stockPlan = cancellationStockPlan(sale); }
+  catch (err) { blocked = err instanceof Error ? err.message : 'No se pudo calcular el stock.'; }
   const save = async () => {
     if (busy || blocked) return;
     setBusy(true); setError('');
     try {
-      await StorageService.cancelSale(sale.id, user.id, pin, reason, reviewed);
+      await StorageService.cancelSale(sale.id, user.id, pin, reason, reviewed, stockMode, cancellationSignature(sale));
       setPin(''); setDone(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'No se pudo anular la venta.');
@@ -33,7 +37,7 @@ export const CancelSaleButton: React.FC<{ sale: Sale; user: User; onUpdate?: () 
     } finally { setBusy(false); }
   };
   return <>
-    <button type="button" onClick={() => { setOpen(true); setError(''); setReason(''); setPin(''); setReviewed(false); }}
+    <button type="button" onClick={() => { setOpen(true); setError(''); setReason(''); setPin(''); setReviewed(false); setStockMode('automatic'); }}
       className="block mt-2 px-3 py-2 rounded-lg bg-red-50 hover:bg-red-100 text-red-700 text-xs font-bold">Anular venta</button>
     {open && <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-3 text-left" role="dialog" aria-modal="true" aria-label="Anular venta">
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto p-5 space-y-4">
@@ -45,14 +49,22 @@ export const CancelSaleButton: React.FC<{ sale: Sale; user: User; onUpdate?: () 
           <div>Total: <strong>{money(sale.total)}</strong> · Cobros posteriores de cuotas: <strong>{money(collected(sale))}</strong></div>
           <ul className="mt-2 list-disc pl-5">{sale.items.map((item, i) => <li key={i}>{item.quantity} × {item.productName} {item.size || ''} {item.color || ''}</li>)}</ul>
         </div>
-        {done ? <p className="text-green-800">Se restituyó el stock y se retiró la operación de ventas, comisiones pendientes y cuentas corrientes. Podés cargar una nueva venta desde Caja.</p> : <>
-          <p className="text-sm bg-amber-50 text-amber-900 rounded-lg p-3">Se devolverán todas estas unidades al inventario y la venta completa dejará de contar en los reportes y deudas. El registro original y sus cobros quedarán conservados en la auditoría. Esta acción no devuelve dinero por banco ni tarjeta.</p>
-          {blocked ? <p className="text-sm text-red-700">Esta venta tiene cambios, devoluciones o comisiones liquidadas. Es necesario revisar esas operaciones antes de anular; esta opción no las revierte automáticamente.</p> : <>
+        {done ? <p className="text-green-800">La operación quedó anulada y fuera de ventas y cuentas corrientes. Se aplicó la opción de stock seleccionada. No hace falta cargar otra venta si solo fue un préstamo.</p> : <>
+          <p className="text-sm bg-amber-50 text-amber-900 rounded-lg p-3">La operación completa dejará de contar como venta y deuda. El ajuste de stock descontará las unidades que ya reingresaron mediante devoluciones registradas. El registro original y sus cobros quedarán conservados en la auditoría. Esta acción no devuelve dinero por banco ni tarjeta.</p>
+          {blocked ? <p className="text-sm text-red-700">{blocked}</p> : <>
+            {sale.commissionPaid && <p className="text-sm bg-amber-50 p-3 rounded-lg text-amber-900">Figura una comisión liquidada. Podés anular igualmente: se conservará esa marca y quedará una advertencia de revisión en la auditoría. La anulación no recupera dinero ya entregado a la vendedora.</p>}
+            <fieldset className="border rounded-lg p-3 text-sm space-y-2">
+              <legend className="font-semibold px-1">Inventario al anular</legend>
+              <label className="flex items-start gap-2"><input type="radio" name={`stock-${sale.id}`} checked={stockMode === 'automatic'} disabled={busy} onChange={() => setStockMode('automatic')} />Ajustar automáticamente según los movimientos registrados</label>
+              <div className="pl-5 text-slate-600">{stockPlan.length ? stockPlan.map(item => <div key={item.productId}>Reingresan {item.quantity} × {item.productName}</div>) : 'No se sumarán unidades: el stock ya fue restituido por las devoluciones registradas.'}</div>
+              <label className="flex items-start gap-2"><input type="radio" name={`stock-${sale.id}`} checked={stockMode === 'already_correct'} disabled={busy} onChange={() => setStockMode('already_correct')} />El stock del sistema ya está correcto por un ajuste manual: anular sin modificar cantidades</label>
+              {stockMode === 'already_correct' && <p className="text-amber-800">Elegí esta opción solo si verificaste el stock en pantalla. Que la prenda haya vuelto físicamente no significa que haya reingresado en el sistema.</p>}
+            </fieldset>
             <label className="block text-sm font-semibold">Motivo de anulación
-              <textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={1000} disabled={busy} className="mt-1 w-full border rounded-lg p-2" placeholder="Por ejemplo: venta cargada por error o duplicada" />
+              <textarea value={reason} onChange={e => setReason(e.target.value)} maxLength={1000} disabled={busy} className="mt-1 w-full border rounded-lg p-2" placeholder="Por ejemplo: préstamo para prueba devuelto sin compra" />
             </label>
             <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={reviewed} onChange={e => setReviewed(e.target.checked)} disabled={busy} className="mt-1" />
-              Confirmo que la mercadería está en el negocio y revisé los pagos y cobros. Si hubo dinero recibido, corresponde devolverlo o conciliarlo al rehacer la operación.
+              Confirmo que no hubo una venta válida, que la mercadería está en el negocio y que verifiqué la opción de stock, los cobros y las comisiones. Si hubo dinero entregado o recibido, revisaré su devolución o conciliación.
             </label>
             <label className="block text-sm font-semibold">Tu PIN de administrador
               <input type="password" autoComplete="off" value={pin} onChange={e => setPin(e.target.value)} disabled={busy} className="mt-1 w-full border rounded-lg p-2" />
@@ -97,7 +109,8 @@ export const CancelledSalesAudit: React.FC<{ user: User }> = ({ user }) => {
         <div className="mt-2 space-y-1 break-words">
           <p>Venta: {sale.id} · {new Date(sale.timestamp).toLocaleString('es-AR')} · Vendedor: {sale.userName}</p>
           <p>Anuló: {sale.cancellation!.userName} · Motivo: {sale.cancellation!.reason}</p>
-          <p>Stock restituido. Forma de pago original: {({cash: 'Efectivo', debit: 'Débito', card: 'Crédito', transfer: 'Transferencia', account: 'Cuenta corriente', mixed: 'Mixto'})[sale.paymentMethod]}</p>
+          <p>{sale.cancellation!.stockMode === 'already_correct' ? 'Stock sin modificar por confirmación del administrador.' : 'Stock compensado según movimientos registrados.'} Forma de pago original: {({cash: 'Efectivo', debit: 'Débito', card: 'Crédito', transfer: 'Transferencia', account: 'Cuenta corriente', mixed: 'Mixto'})[sale.paymentMethod]}</p>
+          {sale.cancellation!.commissionReviewRequired && <p className="bg-amber-50 text-amber-900 p-2 rounded-lg">Revisar comisión: esta operación figuraba liquidada. Comisión registrada al anular: {money(sale.cancellation!.commissionRecordedAtCancellation || 0)}. El historial original se conserva; este valor no acredita un recupero de dinero.</p>}
           {sale.items.map((item, i) => <p key={i}>{item.quantity} × {item.productName} {item.size || ''} {item.color || ''}</p>)}
           {sale.receivable?.installments.map((item, i) => <div key={item.id} className="border-t pt-1">Cuota {i + 1}: {money(item.amount)} · Cobrado antes de anular: {money(item.paidAmount)}
             {item.payments?.map(payment => <p key={payment.id} className="text-xs">{new Date(payment.timestamp).toLocaleString('es-AR')} · {money(payment.amount)} · {payment.method} · {payment.recordedByUserName}</p>)}
