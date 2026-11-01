@@ -12,6 +12,7 @@ import {
   PaymentAllocation,
   ReceivableInstallment,
   CheckoutReturnCredit,
+  StoreVoucher,
 } from '../types';
 import {
   ShoppingCart,
@@ -42,10 +43,12 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { StorageService } from '../services/storageService';
+import { newVoucherCode } from '../services/voucherCodes';
 import BarcodeScannerModal from './BarcodeScannerModal';
 import VariantLookupModal from './VariantLookupModal';
 import SaleReceiptModal from './SaleReceiptModal';
 import POSReturnCreditModal from './POSReturnCreditModal';
+import VoucherReceipt from './VoucherReceipt';
 
 interface POSProps {
   products: Product[];
@@ -69,6 +72,25 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   const [returnCreditModalOpen, setReturnCreditModalOpen] = useState(false);
   const [refundMethod, setRefundMethod] = useState<Exclude<PaymentMethod, 'account'>>('cash');
   const [refundReceiptNumber, setRefundReceiptNumber] = useState('');
+  const [creditAsVoucher, setCreditAsVoucher] = useState(false);
+  const [voucherCode, setVoucherCode] = useState('');
+  const [voucherLookup, setVoucherLookup] = useState<StoreVoucher | null>(null);
+  const [voucherError, setVoucherError] = useState('');
+  const [voucherBusy, setVoucherBusy] = useState(false);
+  const [voucherPanelOpen, setVoucherPanelOpen] = useState(false);
+  const [giftAmount, setGiftAmount] = useState('');
+  const [giftGiver, setGiftGiver] = useState('');
+  const [giftRecipient, setGiftRecipient] = useState('');
+  const [giftDedication, setGiftDedication] = useState('');
+  const [giftMethod, setGiftMethod] = useState<'cash'|'debit'|'card'|'transfer'>('cash');
+  const [receiptVoucher, setReceiptVoucher] = useState<StoreVoucher | null>(null);
+  // Aviso del último canje confirmado, conservado si Caja vuelve a montarse al actualizar datos.
+  const [lastVoucherPayment, setLastVoucherPayment] = useState<{amount: number; balance: number; code: string; kind: 'gift_card' | 'credit_note'} | null>(() => {
+    try {
+      const stored = sessionStorage.getItem('invictos_last_voucher_payment');
+      return stored ? JSON.parse(stored) : null;
+    } catch { return null; }
+  });
   const [categories, setCategories] = useState<CategoryItem[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
 
@@ -660,6 +682,10 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
   );
 
   const checkoutTotal = finalTotal - returnCreditTotal;
+  const voucherApplied = checkoutTotal > 0 && voucherLookup
+    ? Math.min(checkoutTotal, Math.max(0, Number(voucherLookup.balance || 0))) : 0;
+  const cashAfterVoucher = Math.max(0, checkoutTotal - voucherApplied);
+  const voucherMode = voucherLookup !== null && checkoutTotal > 0;
 
   const totalUnits = cart.reduce(
     (acc, item) =>
@@ -723,7 +749,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     Math.abs(paymentDifference) < 0.01;
 
   const accountAmount =
-    paymentMethod === 'account'
+    voucherMode ? 0 : paymentMethod === 'account'
       ? Math.max(0, checkoutTotal)
       : paymentMethod === 'mixed'
         ? Math.max(
@@ -847,6 +873,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     (): PaymentAllocation[] => {
       if (checkoutTotal <= 0) return [];
 
+      if (voucherMode) {
+        return cashAfterVoucher > 0 ? [{ method: 'cash' as const, amount: cashAfterVoucher }] : [];
+      }
       if (paymentMethod === 'mixed') {
         return parsedMixedPayments;
       }
@@ -871,9 +900,12 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     }
 
     setCheckoutError('');
-
+    if (voucherCode.trim() && !voucherLookup && checkoutTotal > 0) {
+      setCheckoutError('Validá el vale antes de registrar la venta.');
+      return;
+    }
     if (
-      checkoutTotal > 0 &&
+      !voucherMode && checkoutTotal > 0 &&
       paymentMethod === 'mixed' &&
       !mixedPaymentValid
     ) {
@@ -941,6 +973,9 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
     }
 
     setIsProcessing(true);
+    // El aviso anterior deja de corresponder a esta venta.
+    setLastVoucherPayment(null);
+    try { sessionStorage.removeItem('invictos_last_voucher_payment'); } catch {}
 
     try {
       const configRate = toRate(
@@ -1022,8 +1057,11 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         // Cliente opcional.
         customerName: saleCustomerName.trim() || undefined,
 
-        paymentMethod,
+        paymentMethod: voucherMode ? 'mixed' : paymentMethod,
         payments: getPaymentsForSale(),
+        voucherRedemption: voucherMode ? { code: voucherLookup!.code, amount: voucherApplied } : undefined,
+        issuedCreditVoucherCode: checkoutTotal < -0.009 && creditAsVoucher ? newVoucherCode('credit_note') : undefined,
+        issuedCreditVoucherAmount: checkoutTotal < -0.009 && creditAsVoucher ? -checkoutTotal : undefined,
         receivable,
 
         checkoutReturns,
@@ -1035,7 +1073,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             : checkoutTotal > 0
               ? 'charge'
               : 'refund',
-        refundMethod: checkoutTotal < -0.009 ? refundMethod : undefined,
+        refundMethod: checkoutTotal < -0.009 && !creditAsVoucher ? refundMethod : undefined,
         refundReceiptNumber:
           checkoutTotal < -0.009 && (refundMethod === 'debit' || refundMethod === 'card')
             ? refundReceiptNumber.trim() || undefined
@@ -1058,10 +1096,39 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
       };
 
       await StorageService.addSale(sale);
+      let showVoucherConfirmationFirst = false;
+      // Consultar el saldo real DESPUÉS de confirmar la transacción, sin estimarlo desde la pantalla.
+      // Una falla en esta consulta no debe hacer repetir una venta que ya quedó registrada.
+      if (sale.voucherRedemption) {
+        try {
+          const refreshed = await StorageService.getVoucher(sale.voucherRedemption.code);
+          if (refreshed) {
+            const confirmation = {
+              amount: sale.voucherRedemption.amount,
+              balance: Math.max(0, Number(refreshed.balance)),
+              code: sale.voucherRedemption.code,
+              kind: refreshed.kind,
+            };
+            setLastVoucherPayment(confirmation);
+            showVoucherConfirmationFirst = true;
+            try { sessionStorage.setItem('invictos_last_voucher_payment', JSON.stringify(confirmation)); } catch {}
+          }
+        } catch (lookupError) {
+          console.warn('Venta guardada; no fue posible consultar el saldo actualizado del vale.', lookupError);
+        }
+      }
+      if (sale.issuedCreditVoucherCode) {
+        const issued = await StorageService.getVoucher(sale.issuedCreditVoucherCode);
+        if (issued) setReceiptVoucher(issued);
+      }
+      setVoucherLookup(null);
+      setVoucherCode('');
+      setCreditAsVoucher(false);
 
       // Guardamos una copia local de la venta ya registrada para ticket/factura.
       setLastSale(sale);
-      setIsReceiptOpen(true);
+      // El resumen del vale debe verse ANTES que el ticket/factura de venta.
+      setIsReceiptOpen(!showVoucherConfirmationFirst);
 
       setCart([]);
       setCheckoutReturns([]);
@@ -1191,6 +1258,80 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
   return (
     <div className="space-y-5">
+      {lastVoucherPayment && (
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-slate-950/60 p-4"
+          role="presentation"
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="voucher-payment-confirmation-title"
+            className="w-full max-w-md rounded-2xl border border-green-200 bg-white p-6 shadow-2xl"
+          >
+            <div className="flex items-center gap-3 text-green-800">
+              <CheckCircle size={28} aria-hidden="true" />
+              <h2 id="voucher-payment-confirmation-title" className="text-xl font-bold">
+                Pago con vale registrado correctamente
+              </h2>
+            </div>
+            <p className="mt-4 text-sm text-slate-600">
+              {lastVoucherPayment.kind === 'credit_note' ? 'Nota de Crédito' : 'Gift Card'}
+            </p>
+            <div className="mt-3 space-y-3 rounded-xl bg-green-50 p-4">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="text-slate-700">Pago realizado</span>
+                <strong className="text-lg text-slate-900">${formatMoney(lastVoucherPayment.amount)}</strong>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 border-t border-green-200 pt-3">
+                <span className="font-semibold text-green-900">Saldo disponible</span>
+                <strong className="text-2xl text-green-800">${formatMoney(lastVoucherPayment.balance)}</strong>
+              </div>
+            </div>
+            <p className="mt-4 break-all text-sm text-slate-600">
+              Código: <span className="font-semibold text-slate-800">{lastVoucherPayment.code}</span>
+            </p>
+            <button
+              type="button"
+              autoFocus
+              className="mt-6 w-full rounded-lg bg-indigo-600 px-4 py-3 font-bold text-white hover:bg-indigo-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600"
+              onClick={() => {
+                setLastVoucherPayment(null);
+                try { sessionStorage.removeItem('invictos_last_voucher_payment'); } catch {}
+                // Ahora sí se permite ver/imprimir el comprobante habitual.
+                if (lastSale) setIsReceiptOpen(true);
+              }}
+            >
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="bg-white border border-indigo-200 rounded-xl p-4 space-y-3">
+        <div className="flex justify-between items-center gap-3">
+          <div><strong>Gift Card</strong><p className="text-xs text-slate-500">Cobrar un regalo sin entregar mercadería.</p></div>
+          <button className="bg-indigo-100 text-indigo-800 px-3 py-2 rounded-lg font-semibold" onClick={() => setVoucherPanelOpen(!voucherPanelOpen)} type="button">{voucherPanelOpen ? 'Cerrar' : 'Emitir Gift Card'}</button>
+        </div>
+        {voucherPanelOpen && <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <label className="text-sm">Importe $<input className="w-full border p-2 rounded" type="number" min="1" value={giftAmount} onChange={e => setGiftAmount(e.target.value)} /></label>
+          <label className="text-sm">Cómo se cobró<select className="w-full border p-2 rounded" value={giftMethod} onChange={e => setGiftMethod(e.target.value as typeof giftMethod)}><option value="cash">Efectivo</option><option value="debit">Débito</option><option value="card">Tarjeta</option><option value="transfer">Transferencia</option></select></label>
+          <label className="text-sm">Quién regala<input className="w-full border p-2 rounded" value={giftGiver} onChange={e => setGiftGiver(e.target.value)} /></label>
+          <label className="text-sm">Quién recibe<input className="w-full border p-2 rounded" value={giftRecipient} onChange={e => setGiftRecipient(e.target.value)} /></label>
+          <label className="text-sm sm:col-span-2">Dedicatoria (opcional)<input className="w-full border p-2 rounded" value={giftDedication} onChange={e => setGiftDedication(e.target.value)} /></label>
+          <button type="button" disabled={voucherBusy || Number(giftAmount) <= 0} className="bg-indigo-600 text-white px-3 py-2 rounded disabled:opacity-50 sm:col-span-2" onClick={async () => {
+            setVoucherBusy(true); setVoucherError('');
+            try {
+              const issued = await StorageService.issueGiftCard({ amount: Number(giftAmount), giver: giftGiver, recipient: giftRecipient, dedication: giftDedication, paymentMethod: giftMethod, user: currentUser });
+              setReceiptVoucher(issued); setGiftAmount(''); setGiftGiver(''); setGiftRecipient(''); setGiftDedication(''); setVoucherPanelOpen(false);
+              // La emision no modifica inventario: no refrescar toda Caja aqui,
+              // ya que una base sin productos desmonta POS y oculta el comprobante.
+            } catch (error: any) { setVoucherError(error?.message || 'No se pudo emitir el vale.'); }
+            finally { setVoucherBusy(false); }
+          }}>{voucherBusy ? 'Guardando...' : 'Confirmar cobro y emitir Gift Card'}</button>
+        </div>}
+        {voucherError && <p className="text-red-700 text-sm">{voucherError}</p>}
+      </div>
+
       {/* CABECERA */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3">
         <div>
@@ -2099,7 +2240,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             </p>
           </div>
 
-          {checkoutTotal > 0 && (<>
+          {checkoutTotal > 0 && !voucherMode && (<>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             <button
               type="button"
@@ -2530,10 +2671,31 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
 
           </>)}
 
+          {checkoutTotal > 0 && <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3 space-y-2">
+            <strong className="text-sm">Pagar con Gift Card / Nota de Crédito</strong>
+            <p className="text-xs">Al portador: ingresar o pegar el código. Si no alcanza el saldo, la diferencia se cobra en efectivo.</p>
+            <div className="flex flex-wrap gap-2">
+              <input className="border rounded px-3 py-2 flex-1" placeholder="GC-XXXXXXXX / NC-XXXXXXXX o código anterior" value={voucherCode} onChange={e => {setVoucherCode(e.target.value); setVoucherLookup(null); setVoucherError('');}} />
+              <button type="button" className="bg-indigo-700 text-white rounded px-3 py-2" onClick={async () => {
+                setVoucherBusy(true); setVoucherError('');
+                try { const found = await StorageService.getVoucher(voucherCode.trim()); if (!found || found.balance <= 0) throw new Error('Vale inexistente o sin saldo.'); setVoucherLookup(found); }
+                catch (e: any) { setVoucherLookup(null); setVoucherError(e?.message || 'Error consultando el vale.'); }
+                finally {setVoucherBusy(false);}
+              }}>Validar</button>
+              {voucherMode && <button type="button" className="border rounded px-3 py-2" onClick={() => {setVoucherLookup(null); setVoucherCode('');}}>Quitar</button>}
+            </div>
+            {voucherMode && <p className="font-semibold text-sm text-indigo-900">Saldo: ${formatMoney(voucherLookup!.balance)} · Se aplican ${formatMoney(voucherApplied)} · Resta efectivo: ${formatMoney(cashAfterVoucher)}</p>}
+            {voucherError && <p className="text-sm text-red-700">{voucherError}</p>}
+          </div>}
+
           {checkoutTotal < -0.009 && (
             <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-3">
               <div className="text-sm font-bold text-amber-900">Devolver al cliente: ${formatMoney(Math.abs(checkoutTotal))}</div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <label className="flex gap-2 items-center font-semibold">
+                <input type="checkbox" checked={creditAsVoucher} onChange={e => setCreditAsVoucher(e.target.checked)} />
+                Emitir Nota de Crédito al portador en lugar de devolver dinero
+              </label>
+              {!creditAsVoucher && <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {([
                   ['cash', 'Efectivo', Banknote],
                   ['debit', 'Débito', CreditCard],
@@ -2549,8 +2711,8 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
                     <Icon size={15} /> {label}
                   </button>
                 ))}
-              </div>
-              {(refundMethod === 'debit' || refundMethod === 'card') && (
+              </div>}
+              {!creditAsVoucher && (refundMethod === 'debit' || refundMethod === 'card') && (
                 <input
                   type="text"
                   value={refundReceiptNumber}
@@ -2584,7 +2746,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             disabled={
               (cart.length === 0 && checkoutReturns.length === 0) ||
               isProcessing ||
-              (checkoutTotal > 0 && paymentMethod === 'mixed' &&
+              (checkoutTotal > 0 && !voucherMode && paymentMethod === 'mixed' &&
                 !mixedPaymentValid) ||
               (checkoutTotal > 0 && accountAmount > 0 &&
                 !accountInstallmentsValid)
@@ -2592,7 +2754,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
             className={`w-full py-4 rounded-xl font-bold text-lg shadow-md transition-all flex items-center justify-center gap-2 ${
               (cart.length > 0 || checkoutReturns.length > 0) &&
               !isProcessing &&
-              (checkoutTotal <= 0 || paymentMethod !== 'mixed' ||
+              (checkoutTotal <= 0 || voucherMode || paymentMethod !== 'mixed' ||
                 mixedPaymentValid) &&
               (checkoutTotal <= 0 || accountAmount <= 0 ||
                 accountInstallmentsValid)
@@ -2615,6 +2777,7 @@ const POS: React.FC<POSProps> = ({ products, onSaleComplete, currentUser }) => {
         </div>
       </div>
 
+      <VoucherReceipt voucher={receiptVoucher} onClose={() => setReceiptVoucher(null)} />
       <POSReturnCreditModal
         open={returnCreditModalOpen}
         products={products}

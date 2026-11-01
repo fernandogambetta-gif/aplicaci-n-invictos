@@ -1,6 +1,7 @@
 
-import React, { useMemo, useState } from 'react';
-import { Product, Sale, User } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { StorageService } from '../services/storageService';
+import { Product, Sale, StoreVoucher, User } from '../types';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
   LineChart, Line, PieChart, Pie, Cell 
@@ -27,6 +28,89 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
   const [activeTab, setActiveTab] = useState<TabView>('overview');
 
   const isAdmin = currentUser.role === 'admin';
+
+  const [vouchers, setVouchers] = useState<StoreVoucher[]>([]);
+  const [voucherLoading, setVoucherLoading] = useState(true);
+  const [voucherError, setVoucherError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      setVoucherLoading(true);
+      setVoucherError('');
+      try {
+        const data = await StorageService.getStoreVouchers();
+        if (active) setVouchers(Array.isArray(data) ? data : []);
+      } catch (error: any) {
+        if (active) setVoucherError(String(error?.message || 'Error consultando Gift Cards'));
+      } finally {
+        if (active) setVoucherLoading(false);
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, []);
+
+  const cashSummary = useMemo(() => {
+    const now = Date.now();
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    if (timeRange === 'week') {
+      start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    } else if (timeRange === 'month') {
+      start.setDate(1);
+    } else if (timeRange === 'year') {
+      start.setMonth(0, 1);
+    }
+    const inPeriod = (value: number) => value >= start.getTime() && value <= now;
+    const valid = (n: unknown) => Number.isFinite(Number(n)) ? Number(n) : 0;
+    let salesCollected = 0;
+    for (const sale of Array.isArray(sales) ? sales : []) {
+      if (!sale || (!isAdmin && sale.userId !== currentUser.id) || sale.cancellation) continue;
+      if (inPeriod(valid(sale.timestamp))) {
+        const settlement = sale.settlementTotal;
+        const isRefund = sale.settlementDirection === 'refund' || (typeof settlement === 'number' && settlement < -0.009);
+        if (isRefund) {
+          // Si el cliente recibió una nota de crédito, NO se devolvió dinero.
+          if (!sale.issuedCreditVoucherCode) salesCollected -= Math.abs(valid(settlement));
+        } else if (sale.settlementDirection !== 'none') {
+          if (Array.isArray(sale.payments)) {
+            salesCollected += sale.payments
+              .filter(p => p.method !== 'account')
+              .reduce((sum, p) => sum + Math.max(0, valid(p.amount)), 0);
+          } else {
+            // Compatibilidad con ventas antiguas sin detalle de medios de pago.
+            if (sale.paymentMethod !== 'account') {
+              const due = typeof settlement === 'number' ? settlement : valid(sale.total);
+              salesCollected += Math.max(0, due - Math.max(0, valid(sale.voucherRedemption?.amount)));
+            }
+          }
+        }
+      }
+      // Las cuotas cobran dinero al abonarse, no al vender a cuenta corriente.
+      for (const installment of sale.receivable?.installments || []) {
+        for (const payment of installment.payments || []) {
+          if (inPeriod(valid(payment.timestamp))) salesCollected += Math.max(0, valid(payment.amount));
+        }
+      }
+      // Diferencias cobradas o devueltas después de la venta original.
+      for (const adjustment of sale.adjustments || []) {
+        if (!inPeriod(valid(adjustment.timestamp))) continue;
+        if (adjustment.settlement?.direction === 'charge') salesCollected += Math.max(0, valid(adjustment.settlement.amount));
+        if (adjustment.settlement?.direction === 'refund') salesCollected -= Math.max(0, valid(adjustment.settlement.amount));
+      }
+    }
+    const giftsCollected = vouchers
+      .filter(v => v && v.kind === 'gift_card' && (isAdmin || v.createdById === currentUser.id) && inPeriod(valid(v.createdAt)))
+      .reduce((sum, v) => sum + Math.max(0, valid(v.initialAmount)), 0);
+    return { salesCollected, giftsCollected, total: salesCollected + giftsCollected };
+  }, [sales, vouchers, timeRange, isAdmin, currentUser.id]);
+
+  const money = (amount: number) => amount.toLocaleString('es-AR', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+  const timeLabel = ({today:'Hoy', week:'Semana', month:'Mes', year:'Año'} as const)[timeRange];
+
 
   // Importe económico de una venta considerando devoluciones registradas.
   // Las devoluciones de ventas INVICTOS impactan en la venta original mediante
@@ -275,12 +359,42 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
       {/* --- VIEW: OVERVIEW --- */}
       {activeTab === 'overview' && (
         <div className="space-y-6 animate-fade-in">
+            {/* Cobros reales: las Gift Cards se cobran al emitir; su canje NO es otro cobro. */}
+            <div className="bg-white border border-indigo-200 rounded-xl p-5 space-y-3 shadow-sm">
+              <div className="flex flex-wrap justify-between items-center gap-2">
+                <h3 className="font-bold text-slate-800">Ingresos de Caja — {timeLabel}</h3>
+                <span className="text-xs text-slate-500">Ventas cobradas + emisión de Gift Cards</span>
+              </div>
+              {voucherError ? (
+                <p className="text-sm text-red-700" role="alert">No se pudieron consultar las Gift Cards: {voucherError}. El total no está disponible.</p>
+              ) : voucherLoading ? (
+                <p className="text-sm text-slate-500">Calculando ingresos reales...</p>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="rounded-lg bg-slate-50 p-4">
+                      <p className="text-xs text-slate-600">Cobrado por ventas</p>
+                      <p className="text-xl font-bold text-slate-800">${money(cashSummary.salesCollected)}</p>
+                    </div>
+                    <div className="rounded-lg bg-indigo-50 p-4">
+                      <p className="text-xs text-slate-600">Cobrado por Gift Cards</p>
+                      <p className="text-xl font-bold text-slate-800">${money(cashSummary.giftsCollected)}</p>
+                    </div>
+                    <div className="rounded-lg bg-emerald-50 p-4">
+                      <p className="text-xs text-emerald-900">Total ingresado en Caja</p>
+                      <p className="text-2xl font-bold text-emerald-700">${money(cashSummary.total)}</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500">Los pagos con Gift Cards y Notas de Crédito no se cuentan como dinero nuevo. Las ventas de mercadería y su rentabilidad se informan aparte.</p>
+                </>
+              )}
+            </div>
             {/* KPI Cards */}
             <div className={`grid grid-cols-1 md:grid-cols-2 ${isAdmin ? 'lg:grid-cols-4' : 'lg:grid-cols-3'} gap-4`}>
                 <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
                     <div className="flex justify-between items-start">
                         <div>
-                            <p className="text-sm font-medium text-slate-500">{isAdmin ? 'Ingresos Globales' : 'Mis Ingresos'} ({timeRange})</p>
+                            <p className="text-sm font-medium text-slate-500">{isAdmin ? 'Ventas de mercadería' : 'Mis ventas de mercadería'} ({timeRange})</p>
                             <p className="text-2xl font-bold text-slate-800 mt-1">${stats.totalRevenue.toLocaleString()}</p>
                         </div>
                         <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
@@ -330,7 +444,7 @@ const Dashboard: React.FC<DashboardProps> = ({ products, sales, onNavigate, curr
 
             {/* Main Chart */}
             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 h-80">
-                <h3 className="text-lg font-bold text-slate-700 mb-4">{isAdmin ? 'Evolución de Ingresos Globales' : 'Mi Evolución de Ventas'}</h3>
+                <h3 className="text-lg font-bold text-slate-700 mb-4">{isAdmin ? 'Evolución de Ventas de Mercadería' : 'Mi Evolución de Ventas'}</h3>
                 {chartData.length > 0 ? (
                     <ResponsiveContainer width="100%" height="100%">
                         <LineChart data={chartData}>
