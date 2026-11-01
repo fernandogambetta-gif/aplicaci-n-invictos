@@ -384,6 +384,9 @@ export interface Sale {
   refundReceiptNumber?: string;
 
   operationType?: 'sale' | 'sale_with_return' | 'return_only';
+  voucherRedemption?: { code: string; amount: number };
+  issuedCreditVoucherCode?: string;
+  issuedCreditVoucherAmount?: number;
 
   commissionPaid?: boolean;
   commissionPaidDate?: number;
@@ -592,4 +595,23 @@ export interface SocietyContribution {
   voidedByUserId?: string;
   voidedByUserName?: string;
   voidReason?: string;
+}
+
+// Vales al portador: el saldo se valida siempre en Firestore.
+export type VoucherKind = 'gift_card' | 'credit_note';
+export interface StoreVoucher {
+  code: string;
+  kind: VoucherKind;
+  initialAmount: number;
+  balance: number;
+  createdAt: number;
+  createdById: string;
+  createdByName: string;
+  giver?: string;
+  recipient?: string;
+  dedication?: string;
+  customerName?: string;
+  sourceSaleId?: string;
+  paymentMethod?: 'cash' | 'debit' | 'card' | 'transfer';
+  movements: Array<{ saleId: string; amount: number; timestamp: number }>;
 }
