@@ -10,8 +10,10 @@ import {
   Expense,
   ExpenseCategory,
   SalePaymentMethod,
+  StoreVoucher,
 } from '../types';
 import { StorageService } from '../services/storageService';
+import VoucherCashPanel from './VoucherCashPanel';
 import AccountsReceivablePanel from './AccountsReceivablePanel';
 import SaleAdjustmentModal from './SaleAdjustmentModal';
 import SaleAdjustmentReceiptModal from './SaleAdjustmentReceiptModal';
@@ -41,7 +43,7 @@ interface SalesHistoryProps {
 }
 
 type PeriodType = 'day' | 'week' | 'month' | 'year' | 'custom';
-type HistoryTab = 'sales' | 'sellers' | 'expenses' | 'receivables';
+type HistoryTab = 'sales' | 'sellers' | 'expenses' | 'receivables' | 'vouchers';
 
 interface Range {
   start: number;
@@ -147,6 +149,38 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
   onUpdate,
 }) => {
   const isAdmin = currentUser.role === 'admin';
+  // Historial informativo: los canjes no generan un segundo ingreso.
+  const [voucherRecords, setVoucherRecords] = useState<StoreVoucher[]>([]);
+  const [voucherLoadError, setVoucherLoadError] = useState('');
+  useEffect(() => {
+    let alive = true;
+    StorageService.getStoreVouchers()
+      .then((records) => { if (alive) setVoucherRecords(Array.isArray(records) ? records : []); })
+      .catch((error) => { if (alive) setVoucherLoadError(String(error?.message || error)); });
+    return () => { alive = false; };
+  }, []);
+  const voucherMovementRows = useMemo(() => {
+    const rows: Array<{ key: string; timestamp: number; operation: string; code: string; detail: string; amount: number; income: number }> = [];
+    const allowed = (id: string) => currentUser.role === 'admin' || currentUser.id === id;
+    voucherRecords.filter(v => v && allowed(v.createdById)).forEach(v => {
+      rows.push({ key: `issue-${v.code}`, timestamp: Number(v.createdAt || 0),
+        operation: v.kind === 'gift_card' ? 'Emisión de Gift Card' : 'Emisión de Nota de Crédito',
+        code: v.code || '', detail: v.kind === 'gift_card' ? `Cobro por ${paymentLabel((v.paymentMethod || 'cash') as SalePaymentMethod)}` : 'Crédito por devolución / cambio',
+        amount: Number(v.initialAmount || 0), income: v.kind === 'gift_card' ? Number(v.initialAmount || 0) : 0 });
+    });
+    (Array.isArray(sales) ? sales : []).filter(s => s && allowed(s.userId)).forEach(s => {
+      const v = s.voucherRedemption;
+      if (!v) return;
+      const code = String(v.code || '');
+      const credit = /^(INV-)?NC-/i.test(code);
+      const goods = (Array.isArray(s.items) ? s.items : []).map(i => `${i.quantity} × ${i.productName}`).join(', ');
+      rows.push({ key: `redeem-${s.id}`, timestamp: Number(s.timestamp || 0),
+        operation: credit ? 'Compra con Nota de Crédito' : 'Compra con Gift Card',
+        code, detail: goods || 'Sin mercadería nueva',
+        amount: Number(v.amount || 0), income: 0 });
+    });
+    return rows.sort((a,b) => b.timestamp - a.timestamp);
+  }, [voucherRecords, sales, currentUser.id, currentUser.role]);
   const today = new Date();
 
   const [tab, setTab] = useState<HistoryTab>(() => {
@@ -1696,6 +1730,12 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
         />
 
         <TabButton
+          active={tab === 'vouchers'}
+          onClick={() => setTab('vouchers')}
+          label="Cobros Gift Cards"
+        />
+
+        <TabButton
           active={tab === 'receivables'}
           onClick={() => setTab('receivables')}
           label="Cuentas corrientes"
@@ -1723,6 +1763,28 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
           </>
         )}
       </div>
+
+      {tab === 'vouchers' && <VoucherCashPanel currentUser={currentUser} />}
+
+      {tab === 'sales' && (
+        <section className="bg-white border border-slate-200 rounded-2xl shadow-sm p-4 mb-4 space-y-3">
+          <h3 className="font-bold text-slate-800">Historial de Gift Cards y Notas de Crédito</h3>
+          <p className="text-xs text-slate-500">La emisión de una Gift Card es un cobro. El uso de un vale registra mercadería entregada, pero no un segundo ingreso de dinero.</p>
+          {voucherLoadError && <p className="text-sm text-red-700">No se pudieron consultar los vales: {voucherLoadError}</p>}
+          <div className="overflow-x-auto"><table className="min-w-full text-left text-sm">
+            <thead className="bg-slate-50"><tr><th className="p-2">Fecha</th><th className="p-2">Movimiento</th><th className="p-2">Código</th><th className="p-2">Producto / Detalle</th><th className="p-2 text-right">Importe</th><th className="p-2 text-right">Dinero ingresado</th></tr></thead>
+            <tbody>{voucherMovementRows.map(r => <tr key={r.key} className="border-t align-top">
+              <td className="p-2 whitespace-nowrap">{formatDateTime(r.timestamp)}</td>
+              <td className="p-2">{r.operation}</td>
+              <td className="p-2 font-mono text-xs">{r.code}</td>
+              <td className="p-2">{r.detail}</td>
+              <td className="p-2 text-right whitespace-nowrap">${money(r.amount)}</td>
+              <td className="p-2 text-right whitespace-nowrap">${money(r.income)}</td>
+            </tr>)}</tbody>
+          </table>{voucherMovementRows.length === 0 && <p className="p-3 text-sm text-slate-500">No hay movimientos de vales para mostrar.</p>}</div>
+          <p className="text-xs text-slate-500">Listado informativo: no se suma por segunda vez al cálculo de ingresos de Caja. En pagos mixtos, los cobros adicionales siguen registrados en la venta.</p>
+        </section>
+      )}
 
       {tab === 'sales' && (
         <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
@@ -2013,6 +2075,13 @@ const SalesHistory: React.FC<SalesHistoryProps> = ({
                         </Td>
 
                         <Td>
+                          {sale.voucherRedemption && <div className="mb-1 text-xs font-semibold text-indigo-700">
+                            { /^(INV-)?NC-/i.test(sale.voucherRedemption.code || '') ? 'Nota de Crédito' : 'Gift Card' }
+                            {' · '}{sale.voucherRedemption.code} · ${money(sale.voucherRedemption.amount)}
+                          </div>}
+                          {sale.issuedCreditVoucherCode && <div className="mb-1 text-xs font-semibold text-amber-700">
+                            Nota de Crédito emitida · {sale.issuedCreditVoucherCode} · ${money(sale.issuedCreditVoucherAmount || 0)}
+                          </div>}
                           {Number(sale.settlementTotal) < -0.009
                             ? `Devolución · ${paymentLabel(sale.refundMethod || 'cash')}`
                             : Math.abs(Number(sale.settlementTotal || 0)) < 0.01 && sale.checkoutReturns?.length

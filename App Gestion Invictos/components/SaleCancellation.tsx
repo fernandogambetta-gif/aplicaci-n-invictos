@@ -64,8 +64,10 @@ export const CancelSaleButton: React.FC<{ sale: Sale; user: User; onUpdate?: () 
           <div>Total: <strong>{money(sale.total)}</strong> · Cobros posteriores de cuotas: <strong>{money(collected(sale))}</strong></div>
           <ul className="mt-2 list-disc pl-5">{sale.items.map((item, i) => <li key={i}>{item.quantity} × {item.productName} {item.size || ''} {item.color || ''}</li>)}</ul>
         </div>
-        {done ? <p className="text-green-800">La operación quedó anulada y fuera de ventas y cuentas corrientes. Se aplicó la opción de stock seleccionada. No hace falta cargar otra venta si solo fue un préstamo.</p> : <>
+        {done ? <p className="text-green-800">La operación quedó anulada y fuera de ventas y cuentas corrientes. Se aplicó la opción de stock seleccionada. {sale.voucherRedemption ? 'El importe abonado con vale fue restituido a su saldo.' : 'No hace falta cargar otra venta si solo fue un préstamo.'}</p> : <>
           <p className="text-sm bg-amber-50 text-amber-900 rounded-lg p-3">La operación completa dejará de contar como venta y deuda. El ajuste de stock descontará las unidades que ya reingresaron mediante devoluciones registradas. El registro original y sus cobros quedarán conservados en la auditoría. Esta acción no devuelve dinero por banco ni tarjeta.</p>
+          {sale.voucherRedemption && <p className="text-sm bg-emerald-50 text-emerald-900 border border-emerald-200 rounded-lg p-3"><strong>Restitución automática al vale:</strong> {money(Number(sale.voucherRedemption.amount || 0))} al código {sale.voucherRedemption.code}. El saldo se repondrá en Firestore al confirmar la anulación, sin entregar efectivo.</p>}
+          {sale.issuedCreditVoucherCode && <p className="text-sm bg-red-50 text-red-800 rounded-lg p-3">Esta venta emitió una Nota de Crédito. Por seguridad, la anulación está bloqueada hasta revisar el crédito emitido.</p>}
           {loading ? <p className="text-sm text-indigo-700">Consultando la venta y sus devoluciones…</p> : !previewReady ? null : blocked ? <p className="text-sm text-red-700">{blocked}</p> : <>
             {!!linkedSales.length && <div className="border border-indigo-200 rounded-lg p-3 bg-indigo-50 text-sm space-y-2">
               <strong>Se anularán juntos estos registros:</strong>
@@ -96,7 +98,7 @@ export const CancelSaleButton: React.FC<{ sale: Sale; user: User; onUpdate?: () 
         {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
         <div className="flex justify-end gap-2">
           <button type="button" disabled={busy || loading} onClick={() => { setOpen(false); setPin(''); }} className="px-4 py-2 border rounded-lg">{done ? 'Cerrar' : 'Volver'}</button>
-          {!done && previewReady && !loading && !blocked && <button type="button" onClick={save} disabled={busy || !reviewed || reason.trim().length < 5 || !pin.trim()} className="px-4 py-2 bg-red-700 text-white rounded-lg disabled:opacity-40">{busy ? 'Anulando…' : linkedSales.length ? 'Confirmar anulación conjunta' : 'Confirmar anulación'}</button>}
+          {!done && previewReady && !loading && !blocked && !sale.issuedCreditVoucherCode && <button type="button" onClick={save} disabled={busy || !reviewed || reason.trim().length < 5 || !pin.trim()} className="px-4 py-2 bg-red-700 text-white rounded-lg disabled:opacity-40">{busy ? 'Anulando…' : linkedSales.length ? 'Confirmar anulación conjunta' : 'Confirmar anulación'}</button>}
         </div>
       </div>
     </div>}

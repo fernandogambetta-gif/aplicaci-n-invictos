@@ -18,6 +18,7 @@ import {
   SocietyAsset,
   SocietyPartner,
   SocietyContribution,
+  StoreVoucher,
 } from '../types';
 
 import {
@@ -37,6 +38,7 @@ import {
 } from 'firebase/firestore';
 
 import { db } from './firebase';
+import { newVoucherCode, normalizeVoucherCode, voucherDocumentId } from './voucherCodes';
 
 // 🔧 Helper para eliminar campos undefined antes de guardar en Firestore
 const cleanData = (data: any): any => {
@@ -61,6 +63,7 @@ const cleanData = (data: any): any => {
 const COLLECTIONS = {
   PRODUCTS: 'products',
   SALES: 'sales',
+  VOUCHERS: 'storeVouchers',
   LEGACY_SALE_ADJUSTMENTS: 'legacySaleAdjustments',
   USERS: 'users',
   CONFIG: 'config',
@@ -308,6 +311,29 @@ const logFirestoreInfo = () => {
     });
   } catch {
     /* noop */
+  }
+};
+
+// La firma de revisión contiene objetos leídos desde Firestore. Dos lecturas
+// pueden producir objetos equivalentes con un orden distinto de propiedades.
+// Se conserva la comparación de TODOS los valores, normalizando solo ese orden.
+const stableCancellationValue = (value: any): any => {
+  if (Array.isArray(value)) return value.map(stableCancellationValue);
+  if (value && typeof value === 'object') {
+    return Object.keys(value).sort().reduce((acc: Record<string, any>, key) => {
+      acc[key] = stableCancellationValue(value[key]);
+      return acc;
+    }, {});
+  }
+  return value;
+};
+
+const sameCancellationSignature = (expected: string, actual: string): boolean => {
+  try {
+    return JSON.stringify(stableCancellationValue(JSON.parse(expected))) ===
+      JSON.stringify(stableCancellationValue(JSON.parse(actual)));
+  } catch {
+    return false; // ante firmas inválidas, bloquear la anulación
   }
 };
 
@@ -1523,7 +1549,13 @@ export const StorageService = {
       if (!saleSnap.exists()) throw new Error('No se encontró la venta.');
       const sale = { ...saleSnap.data(), id: saleId } as Sale;
       if (sale.cancellation) return; // Reintento: nunca devuelve el stock dos veces.
-      if (expectedSignature && cancellationSignature(sale) !== expectedSignature) {
+      // La emisión de una nota de crédito está vinculada a una devolución.
+      // No se anula automáticamente mientras no exista una política explícita
+      // para invalidar el crédito emitido (que podría haberse canjeado).
+      if (sale.issuedCreditVoucherCode) {
+        throw new Error('Esta operación emitió una Nota de Crédito. Requiere revisión del crédito antes de anularse.');
+      }
+      if (expectedSignature && !sameCancellationSignature(expectedSignature, cancellationSignature(sale))) {
         throw new Error('La operación cambió desde que abriste esta pantalla. Cerrá, actualizá el historial y revisala antes de anular.');
       }
       const linkedSales: Sale[] = [];
@@ -1531,8 +1563,44 @@ export const StorageService = {
         const linkedSnap = await transaction.get(doc(firestore, COLLECTIONS.SALES, reviewed.id));
         if (!linkedSnap.exists()) throw new Error('Una devolución vinculada ya no existe. Actualizá el historial.');
         const linked = { ...linkedSnap.data(), id: reviewed.id } as Sale;
-        if (cancellationSignature(linked) !== reviewed.signature) throw new Error('Una devolución cambió desde la revisión. Actualizá antes de anular.');
+        if (!sameCancellationSignature(reviewed.signature, cancellationSignature(linked))) throw new Error('Una devolución cambió desde la revisión. Actualizá antes de anular.');
+        if (linked.voucherRedemption || linked.issuedCreditVoucherCode) {
+          throw new Error('Hay una devolución vinculada con vales. No se anula automáticamente para evitar saldos incorrectos.');
+        }
         linkedSales.push(linked);
+      }
+      // Leer el vale dentro de la misma transacción de anulación.
+      // Las lecturas se realizan antes de modificar stock o ventas.
+      const redemption = sale.voucherRedemption;
+      const refundAmount = redemption ? Math.round(Number(redemption.amount) * 100) / 100 : 0;
+      const voucherId = redemption ? voucherDocumentId(redemption.code) : null;
+      if (redemption && (!voucherId || !Number.isFinite(refundAmount) || refundAmount <= 0)) {
+        throw new Error('El vale utilizado no tiene datos válidos; no se anuló la venta.');
+      }
+      const voucherRef = voucherId ? doc(firestore, COLLECTIONS.VOUCHERS, voucherId) : null;
+      const voucherSnap = voucherRef ? await transaction.get(voucherRef) : null;
+      let voucherRefund: { balance: number; movements: StoreVoucher['movements'] } | null = null;
+      if (redemption) {
+        if (!voucherSnap?.exists()) throw new Error('No se encontró el vale original. No se anuló la venta.');
+        const voucher = voucherSnap.data() as StoreVoucher;
+        if (normalizeVoucherCode(voucher.code) !== normalizeVoucherCode(redemption.code)) {
+          throw new Error('El código del vale no coincide. No se anuló la venta.');
+        }
+        const movements = Array.isArray(voucher.movements) ? voucher.movements : [];
+        const used = movements.filter(m => m.saleId === saleId && Number(m.amount) < 0)
+          .reduce((sum, m) => sum - Number(m.amount), 0);
+        const alreadyRestored = movements.some(m => m.saleId === saleId && Number(m.amount) > 0);
+        if (alreadyRestored || Math.abs(used - refundAmount) > 0.01) {
+          throw new Error('El historial del vale no coincide con la venta. Revisá el saldo antes de anular.');
+        }
+        const newBalance = Math.round((Number(voucher.balance) + refundAmount) * 100) / 100;
+        if (!Number.isFinite(newBalance) || newBalance > Number(voucher.initialAmount) + 0.01) {
+          throw new Error('La restitución superaría el importe original del vale. No se anuló la venta.');
+        }
+        voucherRefund = {
+          balance: newBalance,
+          movements: [...movements, { saleId, amount: refundAmount, timestamp: Date.now() }],
+        };
       }
       const plan = cancellationStockPlan(sale, linkedSales);
       const quantities = new Map<string, number>(stockMode === 'automatic'
@@ -1547,6 +1615,14 @@ export const StorageService = {
         products.push({ id, product, quantity });
       }
       const now = Date.now();
+      // Restitución atómica: si falla cualquiera de las escrituras,
+      // Firestore tampoco anula la venta ni mueve el inventario.
+      if (voucherRef && voucherRefund) {
+        transaction.update(voucherRef, {
+          balance: voucherRefund.balance,
+          movements: voucherRefund.movements.map(m => ({ ...m, timestamp: m.timestamp || now })),
+        });
+      }
       for (const { id, product, quantity } of products) {
         const previousStock = Number(product.stock);
         const newStock = previousStock + quantity;
@@ -1590,6 +1666,65 @@ export const StorageService = {
    *
    * Si algo falla, no queda una venta parcialmente procesada.
    */
+  // Gift Card: ingreso de dinero sin movimiento de inventario ni venta de mercadería.
+  issueGiftCard: async (input: {
+    amount: number;
+    giver?: string;
+    recipient?: string;
+    dedication?: string;
+    paymentMethod: 'cash' | 'debit' | 'card' | 'transfer';
+    user: User;
+  }): Promise<StoreVoucher> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const amount = Math.round(Number(input.amount) * 100) / 100;
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Importe inválido.');
+    const code = newVoucherCode('gift_card');
+    const id = voucherDocumentId(code)!;
+    const ref = doc(db, COLLECTIONS.VOUCHERS, id);
+    const now = Date.now();
+    const voucher: StoreVoucher = {
+      code,
+      kind: 'gift_card', initialAmount: amount, balance: amount,
+      createdAt: now, createdById: input.user.id,
+      createdByName: input.user.name,
+      giver: input.giver?.trim() || undefined,
+      recipient: input.recipient?.trim() || undefined,
+      dedication: input.dedication?.trim() || undefined,
+      paymentMethod: input.paymentMethod,
+      movements: [],
+    };
+    // Confirma también la identidad del vendedor: no confiar en el formulario.
+    await runTransaction(db, async transaction => {
+      const userSnap = await transaction.get(doc(db!, COLLECTIONS.USERS, input.user.id));
+      const existingVoucher = await transaction.get(ref);
+      if (existingVoucher.exists()) throw new Error('Colisión de código de Gift Card. Reintentá la emisión.');
+      if (!userSnap.exists() || !['admin', 'seller'].includes(String(userSnap.data()?.role))) {
+        throw new Error('Usuario sin permiso para emitir vales.');
+      }
+      transaction.set(ref, cleanData({ ...voucher, createdByName: String(userSnap.data()?.name || '') }));
+    });
+    return voucher;
+  },
+
+  // Registro de cobros por emisión: la Gift Card ya contiene fecha, importe,
+  // medio de cobro y vendedor. No crear una segunda venta para evitar duplicados.
+  getStoreVouchers: async (): Promise<StoreVoucher[]> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const snap = await getDocs(collection(db, COLLECTIONS.VOUCHERS));
+    return snap.docs.map(d => d.data() as StoreVoucher);
+  },
+
+  getVoucher: async (code: string): Promise<StoreVoucher | null> => {
+    if (!db) throw new Error('Firestore no inicializado');
+    const normalized = normalizeVoucherCode(code);
+    const id = voucherDocumentId(normalized);
+    if (!id) return null;
+    const snap = await getDoc(doc(db, COLLECTIONS.VOUCHERS, id));
+    if (!snap.exists()) return null;
+    const voucher = snap.data() as StoreVoucher;
+    return normalizeVoucherCode(voucher.code) === normalized ? voucher : null;
+  },
+
   addSale: async (sale: Sale): Promise<void> => {
     if (!db) throw new Error('Firestore no inicializado');
 
@@ -1680,6 +1815,15 @@ export const StorageService = {
         const snap = await transaction.get(ref);
         originalSaleSnapshots.set(saleId, snap);
       }
+
+      const redemption = sale.voucherRedemption;
+      const redeemId = redemption?.code ? voucherDocumentId(redemption.code) : null;
+      const redeemRef = redeemId ? doc(db!, COLLECTIONS.VOUCHERS, redeemId) : null;
+      const redeemSnap = redeemRef ? await transaction.get(redeemRef) : null;
+      const creditVoucherRef = sale.issuedCreditVoucherCode
+        ? doc(db!, COLLECTIONS.VOUCHERS, voucherDocumentId(sale.issuedCreditVoucherCode) || '__invalid__')
+        : null;
+      const creditExistingSnap = creditVoucherRef ? await transaction.get(creditVoucherRef) : null;
 
       // A partir de aquí no se hacen más lecturas. Todos los cambios de stock
       // se consolidan primero y recién después se escriben.
@@ -2134,18 +2278,41 @@ export const StorageService = {
       );
       const settlementTotal = positiveTotal - returnCreditTotal;
 
+      const redeemAmount = Math.round(Number(redemption?.amount || 0) * 100) / 100;
+      if (redemption) {
+        if (!redeemRef || !redeemSnap?.exists()) throw new Error('Vale inexistente.');
+        const voucher = redeemSnap.data() as StoreVoucher;
+        if (normalizeVoucherCode(voucher.code) !== normalizeVoucherCode(redemption.code)) throw new Error('Código de vale incorrecto.');
+        if (!Number.isFinite(redeemAmount) || redeemAmount <= 0 ||
+            redeemAmount > Number(voucher.balance || 0) + 0.001 ||
+            redeemAmount > settlementTotal + 0.001) {
+          throw new Error('El saldo del vale no alcanza para este pago.');
+        }
+      }
+      const creditAmount = Math.round(Number(sale.issuedCreditVoucherAmount || 0) * 100) / 100;
+      if (creditVoucherRef) {
+        if (creditExistingSnap?.exists()) throw new Error('La nota de crédito ya fue emitida.');
+        if (!Number.isFinite(creditAmount) || creditAmount <= 0 ||
+            Math.abs(creditAmount + settlementTotal) > 0.02 || !checkoutReturns.length) {
+          throw new Error('La nota de crédito debe cubrir exactamente la diferencia de la devolución.');
+        }
+      }
+      if (settlementTotal < -0.009 && !creditVoucherRef && sale.issuedCreditVoucherAmount) {
+        throw new Error('Falta el código de nota de crédito.');
+      }
+
       const paymentTotal = (sale.payments || []).reduce(
         (sum, payment) => sum + Math.max(0, Number(payment.amount || 0)),
         0,
       );
 
-      if (settlementTotal > 0.009 && Math.abs(paymentTotal - settlementTotal) > 0.02) {
+      if (settlementTotal > 0.009 && Math.abs(paymentTotal + redeemAmount - settlementTotal) > 0.02) {
         throw new Error(
           `Las formas de pago deben sumar $${settlementTotal.toLocaleString('es-AR')}.`,
         );
       }
 
-      if (settlementTotal < -0.009 && !sale.refundMethod) {
+      if (settlementTotal < -0.009 && !creditVoucherRef && !sale.refundMethod) {
         throw new Error('Seleccioná cómo se devolverá la diferencia al cliente.');
       }
 
@@ -2158,11 +2325,11 @@ export const StorageService = {
         total: positiveTotal,
         checkoutReturns: normalizedCredits,
         returnCreditTotal,
-        settlementTotal,
+        settlementTotal: creditVoucherRef ? 0 : (settlementTotal - redeemAmount),
         settlementDirection:
-          Math.abs(settlementTotal) < 0.01
+          creditVoucherRef || Math.abs(settlementTotal - redeemAmount) < 0.01
             ? 'none'
-            : settlementTotal > 0
+            : settlementTotal - redeemAmount > 0
               ? 'charge'
               : 'refund',
         payments: settlementTotal > 0 ? sale.payments || [] : [],
@@ -2276,6 +2443,26 @@ export const StorageService = {
         );
       });
 
+      if (redeemRef && redeemSnap && redemption) {
+        const current = redeemSnap.data() as StoreVoucher;
+        transaction.update(redeemRef, {
+          balance: Math.round((current.balance - redeemAmount) * 100) / 100,
+          movements: [...(current.movements || []), {
+            saleId: sale.id, amount: -redeemAmount, timestamp: Date.now(),
+          }],
+        });
+      }
+      if (creditVoucherRef) {
+        const createdAt = Date.now();
+        transaction.set(creditVoucherRef, cleanData({
+          code: sale.issuedCreditVoucherCode,
+          kind: 'credit_note', initialAmount: creditAmount, balance: creditAmount,
+          createdAt, createdById: sale.recordedByUserId || sale.userId,
+          createdByName: sale.recordedByUserName || sale.userName,
+          customerName: sale.customerName || undefined,
+          sourceSaleId: sale.id, movements: [],
+        } as StoreVoucher));
+      }
       transaction.set(saleRef, cleanData(saleToSave));
     });
   },
